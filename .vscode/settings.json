@@ -1,0 +1,21 @@
+{
+  // 指定虚拟环境的 Python 解释器
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  // Windows 下改成 (如果你在 Windows 上)
+  // "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  // 格式化工具 (推荐使用 Black)
+  "python.formatting.provider": "black",
+  // 自动导入排序
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  },
+  // 让 VS Code 在保存时自动格式化
+  "editor.formatOnSave": true,
+  // Jupyter notebook 默认内核指向虚拟环境
+  "jupyter.pythonInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  // 终端启动时自动激活 venv
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/.venv/lib/python3.12/site-packages"
+  ]
+}
