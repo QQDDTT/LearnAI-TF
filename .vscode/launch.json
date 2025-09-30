@@ -2,12 +2,41 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: Run main.py",
-      "type": "python",
+      "name": "Python: Train",
+      "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
-      "python": "${workspaceFolder}/.venv/bin/python"
+      "args": [
+        "train",
+        "--config",
+        "${input:selectConfig}"
+      ]
+    },
+    {
+      "name": "Python: Evaluate",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "args": [
+        "evaluate",
+        "--config",
+        "${input:selectConfig}"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "selectConfig",
+      "type": "pickString",
+      "description": "选择要使用的配置文件",
+      "options": [
+        "config/config.yaml",
+        "config/config2.yaml",
+        "config/config3.yaml"
+      ],
+      "default": "config/config.yaml"
     }
   ]
 }

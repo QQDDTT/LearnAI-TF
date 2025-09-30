@@ -1,29 +1,59 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_pipeline.py
+基于 config/config_test.yaml 的端到端流程测试：
+1. 训练流程（train）
+2. 评估流程（evaluate）
+"""
+
+import os
 import pytest
-from data.dataloader import load_data
-from models.model import build_model
 import tensorflow as tf
 import yaml
+from main import main
 
-def test_data_loading():
-    """测试数据加载是否正常"""
-    (x_train, y_train), (x_test, y_test) = load_data()
-    assert x_train.shape[0] > 0, "训练数据为空"
-    assert x_test.shape[0] > 0, "测试数据为空"
-    assert x_train.max() <= 1.0 and x_train.min() >= 0.0, "数据未归一化"
 
-def test_model_build():
-    """测试模型构建是否成功"""
-    cfg = {"hidden_units": 64, "dropout": 0.2}
-    model = build_model(cfg)
-    assert isinstance(model, tf.keras.Model), "模型未正确构建"
-    assert model.layers[-1].output_shape[-1] == 10, "输出层类别数应为10"
+@pytest.fixture
+def test_config_path():
+    """返回测试用的 config 文件路径"""
+    return os.path.join("config", "config_test.yaml")
 
-def test_training_step():
-    """测试单步训练是否能跑通"""
-    (x_train, y_train), _ = load_data()
-    model = build_model({"hidden_units": 32, "dropout": 0.1})
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
-    
-    # 跑一个小 batch 确认训练能运行
-    history = model.fit(x_train[:100], y_train[:100], epochs=1, batch_size=32, verbose=0)
-    assert "loss" in history.history, "训练未返回 loss"
+
+# -----------------------------
+# 测试 1️⃣: 训练流程
+# -----------------------------
+def test_train_pipeline(tmp_path, test_config_path, monkeypatch):
+    """
+    使用 config_test.yaml 执行训练流程
+    """
+
+    # 修改模型保存目录到临时目录，避免污染真实 models/
+    save_dir = tmp_path / "saved_model"
+    monkeypatch.setenv("MODEL_SAVE_DIR", str(save_dir))
+
+    # 执行 main.py 的 train
+    main(["train", "--config", test_config_path])
+
+    # 验证保存目录下是否有模型文件
+    assert save_dir.exists()
+    assert any(save_dir.iterdir()), "模型未正确保存"
+
+
+# -----------------------------
+# 测试 2️⃣: 评估流程
+# -----------------------------
+def test_evaluate_pipeline(tmp_path, test_config_path, monkeypatch):
+    """
+    使用 config_test.yaml 执行评估流程
+    """
+
+    # 先跑一遍训练，确保有模型
+    save_dir = tmp_path / "saved_model"
+    monkeypatch.setenv("MODEL_SAVE_DIR", str(save_dir))
+    main(["train", "--config", test_config_path])
+
+    # 执行 main.py 的 evaluate
+    main(["evaluate", "--config", test_config_path])
+
+    # 验证模型目录仍存在
+    assert save_dir.exists()

@@ -10,23 +10,13 @@
     {
       "label": "Clean venv",
       "type": "shell",
-      "command": "rm -rf ${}/.venv",
+      "command": "rm -rf ${workspaceFolder}/.venv",
       "problemMatcher": []
-    },
-    {
-      "label": "Run main",
-      "type": "shell",
-      "command": ".venv/bin/python main.py",
-      "problemMatcher": [],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
     },
     {
       "label": "Run test",
       "type": "shell",
-      "command": ".venv/bin/python -m pytest",
+      "command": ".venv/bin/python -m pytest tests/ -v",
       "problemMatcher": [],
       "group": {
         "kind": "test",
