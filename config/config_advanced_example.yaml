@@ -1,0 +1,181 @@
+# ==============================================================
+# LearnAI-TF 完整多阶段配置示例（反射调用版）
+# 所有字段都采用 reflection + arguments 方式
+# ==============================================================
+stages:
+
+  - name: stage_supervised
+    description: "监督学习阶段示例"
+    model:
+      type: GAN   # 模型类型，可以是 GAN、Sequential、Functional 等
+      modules:   # 模型的子模块，每个子模块可以有独立层、优化器、损失
+        generator:   # 生成器模块
+          layers:    # 生成器的层定义
+            - Dense:   # 全连接层
+                units: 128
+                activation: relu
+                input_shape: [100]  # 输入噪声向量维度
+            - Dense:
+                units: 784
+                activation: tanh
+                name: fake_image
+        discriminator:  # 判别器模块
+          layers:
+            - Dense:
+                units: 128
+                activation: relu
+                input_shape: [784]  # 输入图片向量
+            - Dense:
+                units: 1
+                activation: sigmoid
+                name: validity
+
+      optimizers:   # 每个模块对应的优化器
+        generator:
+          type: Adam
+          args:
+            learning_rate: 0.0002
+            beta_1: 0.5
+        discriminator:
+          type: Adam
+          args:
+            learning_rate: 0.0002
+            beta_1: 0.5
+
+      losses:   # 每个模块对应的损失函数
+        generator: binary_crossentropy
+        discriminator: binary_crossentropy
+
+    data:
+      train:
+        reflection: "data.dataloader:load_csv"
+        arguments:
+          path: "data/raw/train.csv"
+          batch_size: 32
+      val:
+        reflection: "data.dataloader:load_csv"
+        arguments:
+          path: "data/raw/val.csv"
+          batch_size: 32
+
+    training:
+      reflection: "train.train:train_supervised_step"
+      arguments:
+        batch_size: 32
+        epochs: 10
+        learning_rate: 0.001
+        optimizer: adam
+        callbacks:
+          - type: EarlyStopping
+            monitor: val_loss
+            patience: 3
+
+    evaluation:
+      reflection: "train.evaluation:evaluate_supervised_step"
+      arguments: {}
+
+  - name: stage_unsupervised
+    description: "无监督学习阶段示例"
+    model:
+      reflection: "models.model:build_unsupervised_model"
+      arguments:
+        type: autoencoder
+        input_dim: 30
+        latent_dim: 10
+        hidden_units: [64, 32]
+        activation: relu
+        dropout: 0.1
+
+    data:
+      train:
+        reflection: "data.dataloader:load_csv"
+        arguments:
+          path: "data/raw/unsupervised_train.csv"
+          batch_size: 32
+      val:
+        reflection: "data.dataloader:load_csv"
+        arguments:
+          path: "data/raw/unsupervised_val.csv"
+          batch_size: 32
+
+    training:
+      reflection: "train.train:train_unsupervised_step"
+      arguments:
+        batch_size: 32
+        epochs: 20
+        learning_rate: 0.001
+        optimizer: adam
+
+    evaluation:
+      reflection: "train.evaluation:evaluate_unsupervised_step"
+      arguments: {}
+
+  - name: stage_rl
+    description: "强化学习阶段示例"
+    model:
+      reflection: "models.model:build_model"
+      arguments:
+        type: mlp
+        input_dim: 64
+        output_dim: 8
+        hidden_units: [128, 64]
+        activation: relu
+        extra_params:
+          rnn_units: 64
+          num_heads: 4
+
+    environment:
+      reflection: "common.utils:NetworkClient"
+      arguments:
+        host: localhost
+        port: 5000
+        endpoints:
+          reset: "/reset"
+          step: "/step"
+          status: "/status"
+
+    training:
+      reflection: "train.train:train_rl_step"
+      arguments:
+        algorithm: DQN
+        episodes: 5000
+        batch_size: 32
+        learning_rate: 0.001
+        gamma: 0.99
+        update_target_every: 1000
+        replay_buffer_size: 10000
+        exploration:
+          type: epsilon_greedy
+          start: 1.0
+          end: 0.1
+          decay: 0.995
+
+    reward:
+      reflection: "common.utils:compute_reward"
+      arguments:
+        score_delta_weight: 1.0
+        end_bonus: 10.0
+        max_value_bonus: 5.0
+
+    action:
+      reflection: "common.utils:select_action"
+      arguments: {}
+
+    deploy:
+      reflection: "deploy.deployment:deploy_onnx_server"
+      arguments:
+        export_path: "models/saved_model/onnx"
+        server_host: "0.0.0.0"
+        server_port: 8000
+        use_gpu: false
+
+export:
+  reflection: "deploy.deployment:export_onnx"
+  arguments:
+    path: models/saved_model.onnx
+
+deployment:
+  reflection: "deploy.deployment:deploy_onnx_server"
+  arguments:
+    host: 0.0.0.0
+    port: 8080

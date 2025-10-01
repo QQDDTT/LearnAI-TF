@@ -1,0 +1,100 @@
+stages:
+  - name: stage_test
+    description: "测试阶段：简单 MLP 模型"
+    model:
+      type: Functional
+      generator:
+        reflection: tensorflow.keras.Sequential
+        layers:
+          - reflection: tensorflow.keras.layers.Dense
+            args:
+              units: 128
+              activation: relu
+              input_shape: [100]
+          - reflection: tensorflow.keras.layers.Dense
+            args:
+              units: 784
+              activation: tanh
+              name: fake_image
+      discriminator:
+        reflection: tensorflow.keras.Sequential
+        layers:
+          - reflection: tensorflow.keras.layers.Dense
+            args:
+              units: 128
+              activation: relu
+              input_shape: [784]
+          - reflection: tensorflow.keras.layers.Dense
+            args:
+              units: 1
+              activation: sigmoid
+              name: validity
+      optimizers:
+        generator:
+          reflection: tensorflow.keras.optimizers.Adam
+          args:
+            learning_rate: 0.0002
+            beta_1: 0.5
+        discriminator:
+          reflection: tensorflow.keras.optimizers.Adam
+          args:
+            learning_rate: 0.0002
+            beta_1: 0.5
+      losses:
+        generator: tensorflow.keras.losses.BinaryCrossentropy
+        discriminator: tensorflow.keras.losses.BinaryCrossentropy
+
+    data:
+      train:
+        reflection: modules.utils.build_csv_loader
+        args:
+          file_path: "data/train.csv"
+          batch_size: 64
+          shuffle: True
+      val:
+        reflection: modules.utils.build_web_dataset
+        args:
+          host: "127.0.0.1"
+          port: 5000
+          endpoint_path: "/val_csv"
+          payload: null
+          batch_size: 64
+          shuffle: False
+      test:
+        reflection: modules.utils.build_csv_loader   # 修改为 CSV Loader 或自定义 Loader
+        args:
+          file_path: "data/test.csv"
+          batch_size: 32
+          shuffle: False
+
+    training:
+      type: gan                     # 训练类型: gan / supervised / rl
+      epochs: 0
+      batch_size: 0
+      logger: modules.utils.Logger   # logger 实例
+      callbacks:
+        - reflection: tensorflow.keras.callbacks.EarlyStopping
+          args:
+            monitor: val_loss
+            patience: 3
+        - reflection: tensorflow.keras.callbacks.ModelCheckpoint
+          args:
+            filepath: outputs/checkpoints/model_epoch_{epoch}.h5
+            save_best_only: true
+
+    evaluation:
+      reflection: modules.train.evaluation:evaluate_gan_step
+      arguments:
+        metrics: ["accuracy", "loss"]
+        logger: modules.utils.Logger
+        model_key: stage_test
+        dataset: val
+
+export:
+  path: "outputs/onnx/test_model.onnx"
+  model_key: stage_test
+
+deployment:
+  host: "127.0.0.1"
+  port: 9000
+  model_key: stage_test

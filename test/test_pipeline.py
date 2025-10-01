@@ -1,59 +1,57 @@
 # -*- coding: utf-8 -*-
 """
-tests/test_pipeline.py
-基于 config/config_test.yaml 的端到端流程测试：
-1. 训练流程（train）
-2. 评估流程（evaluate）
+测试端到端流程的脚本
+依次执行：训练 -> 评估 -> 导出 -> 部署
 """
 
-import os
-import pytest
-import tensorflow as tf
-import yaml
-from main import main
+from modules.utils import load_yaml, Logger
+from modules.model import build_model
+from modules.dataloader import build_dataloader
+from modules.train import train_model
+from modules.evaluation import evaluate_model
+from modules.export import export_onnx
+from modules.deployment import deploy_onnx_server
+
+logger = Logger(__file__)
+
+def run_pipeline(config_path: str):
+    # ---------------- 配置 & 日志 ----------------
+    config = load_yaml(config_path)
+    logger.info(f"Loaded config from {config_path}")
+
+    # ---------------- 模型初始化 ----------------
+    model_config = config["stages"][0]["model"]
+    model_dict = build_model(model_config)
+    logger.info(f"Model build completed")
 
 
-@pytest.fixture
-def test_config_path():
-    """返回测试用的 config 文件路径"""
-    return os.path.join("config", "config_test.yaml")
+    # ----------------  加载数据 ----------------
+    data_config = config["stages"][0]["data"]
+    dataloaders = build_dataloader(data_config)
+    logger.info(f"Dataloader build completed")
+
+    # ---------------- 训练 ----------------
+    train_config = config["stages"][0]["training"]
+    train_model(train_config, model_dict, dataloaders)
+    logger.info(f"Training completed")
+
+    # ---------------- 评估 ----------------
+    eval_config = config["stages"][0]["evaluation"]
+    evaluate_model(eval_config, model_dict)
+    logger.info(f"Evaluation completed")
+
+    # ---------------- 导出 ----------------
+    exp_config = config["export"]
+    export_onnx(exp_config, model_dict)
+    logger.info("Exporting model completed")
+
+    # ---------------- 部署 ----------------
+    dep_config = config["deployment"]
+    deploy_onnx_server(dep_config)
+    logger.info("Deploying model server completed")
 
 
-# -----------------------------
-# 测试 1️⃣: 训练流程
-# -----------------------------
-def test_train_pipeline(tmp_path, test_config_path, monkeypatch):
-    """
-    使用 config_test.yaml 执行训练流程
-    """
 
-    # 修改模型保存目录到临时目录，避免污染真实 models/
-    save_dir = tmp_path / "saved_model"
-    monkeypatch.setenv("MODEL_SAVE_DIR", str(save_dir))
-
-    # 执行 main.py 的 train
-    main(["train", "--config", test_config_path])
-
-    # 验证保存目录下是否有模型文件
-    assert save_dir.exists()
-    assert any(save_dir.iterdir()), "模型未正确保存"
-
-
-# -----------------------------
-# 测试 2️⃣: 评估流程
-# -----------------------------
-def test_evaluate_pipeline(tmp_path, test_config_path, monkeypatch):
-    """
-    使用 config_test.yaml 执行评估流程
-    """
-
-    # 先跑一遍训练，确保有模型
-    save_dir = tmp_path / "saved_model"
-    monkeypatch.setenv("MODEL_SAVE_DIR", str(save_dir))
-    main(["train", "--config", test_config_path])
-
-    # 执行 main.py 的 evaluate
-    main(["evaluate", "--config", test_config_path])
-
-    # 验证模型目录仍存在
-    assert save_dir.exists()
+if __name__ == "__main__":
+    # 默认用一个配置文件跑完整流程
+    run_pipeline("config_test.yaml")

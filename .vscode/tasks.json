@@ -14,14 +14,32 @@
       "problemMatcher": []
     },
     {
-      "label": "Run test",
+      "label": "Run Test Pipeline",
       "type": "shell",
-      "command": ".venv/bin/python -m pytest tests/ -v",
-      "problemMatcher": [],
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "test/test_pipeline.py",
+        "--config",
+        "config_test.yaml"
+      ],
+      "options": {
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
       "group": {
         "kind": "test",
         "isDefault": true
-      }
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": true,
+        "clear": true
+      },
+      "problemMatcher": []
     }
   ]
 }

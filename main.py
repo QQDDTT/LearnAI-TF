@@ -1,90 +1,71 @@
 # -*- coding: utf-8 -*-
 """
-main.py
-统一入口：支持训练和评估
-- 使用方式：
-    python main.py train --config config/config.yaml
-    python main.py evaluate --config config/config.yaml
+主程序入口
+- 解析参数（动作类型、配置路径）
+- 加载配置和日志对象
+- 初始化模型
+- 根据动作类型调用不同的流程（训练/评估/导出/部署）
 """
 
-import yaml
 import argparse
-import os
-import tensorflow as tf
-
-from data.dataloader import load_data
-from models.model import build_model
-
-
-def parse_args():
-    """
-    解析命令行参数
-    """
-    parser = argparse.ArgumentParser(description="LearnAI-TF 项目入口")
-    parser.add_argument("task", type=str, choices=["train", "evaluate"],
-                        help="运行任务: train / evaluate")
-    parser.add_argument("--config", type=str, default="config/config.yaml",
-                        help="配置文件路径 (默认: config/config.yaml)")
-    return parser.parse_args()
+from modules.utils import load_yaml, Logger
+from modules.model import build_model, build_supervised_model, build_unsupervised_model
+from modules.dataloader import load_csv_data
+from modules.train import train_supervised_step, train_unsupervised_step, train_rl_step
+from modules.evaluation import evaluate_supervised_step, evaluate_unsupervised_step
+from modules.deployment import export_onnx, deploy_onnx_server
 
 
 def main():
-    # 1️⃣ 解析命令行参数
-    args = parse_args()
+    # ---------------- 参数解析 ----------------
+    parser = argparse.ArgumentParser(description="LearnAI 主程序")
+    parser.add_argument("--action", type=str, required=True,
+                        choices=["training", "evaluation", "export", "deploy"],
+                        help="执行的动作类型")
+    parser.add_argument("--config", type=str, required=True,
+                        help="配置文件路径")
+    args = parser.parse_args()
 
-    # 2️⃣ 读取配置文件
-    config_path = args.config
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"配置文件未找到: {config_path}")
+    # ---------------- 加载配置和日志 ----------------
+    config = load_yaml(args.config)
+    logger = Logger(__file__)
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    logger.info(f"Loaded config from {args.config}")
+    logger.info(f"Action: {args.action}")
 
-    batch_size = config.get("batch_size", 64)
-    learning_rate = config.get("learning_rate", 0.001)
-    epochs = config.get("epochs", 10)
-    model_cfg = config.get("model", {"hidden_units": 128, "dropout": 0.2})
+    # ---------------- 初始化模型 ----------------
+    model_type = config["model"]["target"]
+    model = build_model(config)
 
-    # 3️⃣ 加载数据
-    (x_train, y_train), (x_test, y_test) = load_data()
+    # ---------------- 按动作执行 ----------------
+    if args.action == "training":
+        mode = config["training"].get("mode", "supervised")
+        if mode == "supervised":
+            train_supervised_step(config, model)
+        elif mode == "unsupervised":
+            train_unsupervised_step(config, model)
+        elif mode == "rl":
+            train_rl_step(config, model)
+        else:
+            logger.error(f"未知训练模式: {mode}")
 
-    # 4️⃣ 构建模型
-    model = build_model(model_cfg)
+    elif args.action == "evaluation":
+        mode = config["evaluation"].get("mode", "supervised")
+        if mode == "supervised":
+            evaluate_supervised_step(config, model)
+        elif mode == "unsupervised":
+            evaluate_unsupervised_step(config, model)
+        else:
+            logger.error(f"未知评估模式: {mode}")
 
-    # 5️⃣ 根据任务选择逻辑
-    if args.task == "train":
-        # 编译模型
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"]
-        )
+    elif args.action == "export":
+        export_onnx(config, model=model)
 
-        # 训练模型
-        model.fit(
-            x_train, y_train,
-            batch_size=batch_size,
-            epochs=epochs,
-            validation_data=(x_test, y_test)
-        )
+    elif args.action == "deploy":
+        deploy_onnx_server(config)
 
-        # 保存模型
-        saved_model_dir = os.path.join("models", "saved_model")
-        os.makedirs(saved_model_dir, exist_ok=True)
-        model.save(saved_model_dir)
-        print(f"✅ 模型已保存到 {saved_model_dir}")
-
-    elif args.task == "evaluate":
-        # 加载已保存的模型
-        saved_model_dir = os.path.join("models", "saved_model")
-        if not os.path.exists(saved_model_dir):
-            raise FileNotFoundError("未找到已保存模型，请先运行 train")
-
-        model = tf.keras.models.load_model(saved_model_dir)
-
-        # 评估模型
-        loss, acc = model.evaluate(x_test, y_test, batch_size=batch_size)
-        print(f"📊 评估结果 - Loss: {loss:.4f}, Accuracy: {acc:.4f}")
+    else:
+        logger.error(f"未知动作: {args.action}")
 
 
 if __name__ == "__main__":
