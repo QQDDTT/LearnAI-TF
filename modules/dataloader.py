@@ -9,10 +9,10 @@ data/dataloader.py
 """
 
 from typing import Dict
-from modules.utils import call_target, Logger
+from modules.utils import call_target, LoggerManager
 import tensorflow as tf
 
-logger = Logger(__file__)
+logger = LoggerManager.get_logger(__file__)
 
 def build_dataloader(dl_cfg: dict) -> Dict[str, tf.data.Dataset]:
     """

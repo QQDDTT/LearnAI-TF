@@ -4,7 +4,7 @@
 依次执行：训练 -> 评估 -> 导出 -> 部署
 """
 
-from modules.utils import load_yaml, Logger
+from modules.utils import load_yaml, LoggerManager
 from modules.model import build_model
 from modules.dataloader import build_dataloader
 from modules.train import train_model
@@ -12,7 +12,7 @@ from modules.evaluation import evaluate_model
 from modules.export import export_onnx
 from modules.deployment import deploy_onnx_server
 
-logger = Logger(__file__)
+logger = LoggerManager.get_logger(__file__)
 
 def run_pipeline(config_path: str):
     # ---------------- 配置 & 日志 ----------------
@@ -37,7 +37,7 @@ def run_pipeline(config_path: str):
 
     # ---------------- 评估 ----------------
     eval_config = config["stages"][0]["evaluation"]
-    evaluate_model(eval_config, model_dict)
+    evaluate_model(eval_config, model_dict, dataloaders)
     logger.info(f"Evaluation completed")
 
     # ---------------- 导出 ----------------

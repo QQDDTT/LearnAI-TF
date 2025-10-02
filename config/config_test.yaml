@@ -68,27 +68,50 @@ stages:
           shuffle: False
 
     training:
-      type: gan                     # 训练类型: gan / supervised / rl
-      epochs: 0
-      batch_size: 0
-      logger: modules.utils.Logger   # logger 实例
-      callbacks:
-        - reflection: tensorflow.keras.callbacks.EarlyStopping
+      epochs: 3
+      steps:
+        - reflection: modules.losses.compute_loss
           args:
-            monitor: val_loss
-            patience: 3
-        - reflection: tensorflow.keras.callbacks.ModelCheckpoint
+            model: generator
+            loss_fn: gen_loss_fn
+            x: inputs
+            y: labels
+
+        - reflection: modules.optimizer.apply_gradients
           args:
-            filepath: outputs/checkpoints/model_epoch_{epoch}.h5
-            save_best_only: true
+            optimizer: gen_optimizer
+            loss: last_result
+
+        - reflection: modules.losses.compute_loss
+          args:
+            model: discriminator
+            loss_fn: dis_loss_fn
+            x: fake_images
+            y: fake_labels
+
+        - reflection: modules.optimizer.apply_gradients
+          args:
+            optimizer: dis_optimizer
+            loss: last_result
 
     evaluation:
-      reflection: modules.train.evaluation:evaluate_gan_step
-      arguments:
-        metrics: ["accuracy", "loss"]
-        logger: modules.utils.Logger
-        model_key: stage_test
-        dataset: val
+      dataset: val
+      steps:
+        - reflection: modules.inference.forward
+          arguments:
+            model: generator
+            inputs: inputs
+
+        - reflection: modules.losses.compute_loss
+          arguments:
+            predictions: last_result
+            targets: labels
+            loss_fn: gen_loss_fn
+
+        - reflection: modules.metrics.compute_accuracy
+          arguments:
+            predictions: last_result
+            targets: labels
 
 export:
   path: "outputs/onnx/test_model.onnx"

@@ -24,7 +24,8 @@
       ],
       "options": {
         "env": {
-          "PYTHONPATH": "${workspaceFolder}"
+          "PYTHONPATH": "${workspaceFolder}",
+          "LOG_HOME": "/home/nick/logs"
         }
       },
       "group": {

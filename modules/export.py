@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
-from modules.utils import Logger, call_target
+from modules.utils import LoggerManager, call_target
 
-logger = Logger(__file__)
+logger = LoggerManager.get_logger(__file__)
 
 
 def export_onnx(ex_cfg: dict, model_dict: dict):

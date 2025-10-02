@@ -4,9 +4,9 @@ models/model.py
 模型构筑模块
 """
 
-from modules.utils import call_target, Logger
+from modules.utils import call_target, LoggerManager
 
-logger = Logger(__file__)
+logger = LoggerManager.get_logger(__file__)
 
 # ---------------- 构建子模块 ----------------
 def build_module(module_cfg: dict,):
@@ -64,17 +64,11 @@ def build_model(model_cfg: dict):
     except Exception as e:
         logger.error(f"Failed to build loss functions: {e}")
 
-    try:
-        train_type = model_cfg["type"]
-    except Exception as e:
-        logger.error(f"Model type is null: {e}")
-
     return {
         "generator": generator,
         "discriminator": discriminator,
         "gen_optimizer": gen_optimizer,
         "dis_optimizer": dis_optimizer,
         "gen_loss_fn": gen_loss_fn,
-        "dis_loss_fn": dis_loss_fn,
-        "tain_type": train_type
+        "dis_loss_fn": dis_loss_fn
     }

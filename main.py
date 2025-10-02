@@ -8,12 +8,13 @@
 """
 
 import argparse
-from modules.utils import load_yaml, Logger
-from modules.model import build_model, build_supervised_model, build_unsupervised_model
-from modules.dataloader import load_csv_data
-from modules.train import train_supervised_step, train_unsupervised_step, train_rl_step
-from modules.evaluation import evaluate_supervised_step, evaluate_unsupervised_step
-from modules.deployment import export_onnx, deploy_onnx_server
+from modules.utils import load_yaml, LoggerManager
+from modules.model import build_model
+from modules.dataloader import build_dataloader
+from modules.train import train_model
+from modules.evaluation import evaluate_model
+from modules.export import export_onnx
+from modules.deployment import deploy_onnx_server
 
 
 def main():
@@ -28,7 +29,7 @@ def main():
 
     # ---------------- 加载配置和日志 ----------------
     config = load_yaml(args.config)
-    logger = Logger(__file__)
+    logger = LoggerManager.get_logger(__file__)
 
     logger.info(f"Loaded config from {args.config}")
     logger.info(f"Action: {args.action}")

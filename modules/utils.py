@@ -26,15 +26,17 @@ from colorama import Fore, Style, init
 # ======================================================
 # 日志工具类
 # ======================================================
-class Logger:
+class LoggerManager:
     """
-    日志工具类：封装 Python logging
-    控制台彩色输出 + 可选文件输出
-    格式：
-        [datetime][level][classname] message
+    全局日志管理器：
+    - 控制台彩色输出
+    - 文件日志纯文本
+    - 每天一个文件，按项目存放
+    - 每个 Python 文件调用 get_logger(__file__) 获取 logger
     """
-
-    LEVEL_COLOR = {
+    _loggers = {}      # {logger_name: logger实例}
+    _file_handlers = {}  # {project: FileHandler实例}
+    _LEVEL_COLOR = {
         logging.DEBUG: Fore.CYAN,
         logging.INFO: Fore.GREEN,
         logging.WARNING: Fore.YELLOW,
@@ -42,75 +44,82 @@ class Logger:
         logging.CRITICAL: Fore.MAGENTA
     }
 
-    def __init__(self, filename: str, project="LearnAI"):
+    @classmethod
+    def get_logger(cls, filename: str, project="LearnAI"):
         init(autoreset=True)
+        classname = os.path.splitext(os.path.basename(filename))[0]
+        logger_name = f"{project}.{classname}"
 
-        # 去掉路径和后缀，只保留文件名作为 classname
-        self.classname = os.path.splitext(os.path.basename(filename))[0]
+        # 已存在直接返回
+        if logger_name in cls._loggers:
+            return cls._loggers[logger_name]
 
-        # Logger 名字用 project+classname，避免冲突
-        self.logger = logging.getLogger(f"{project}.{self.classname}")
-        self.logger.setLevel(logging.DEBUG)
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.DEBUG)
 
-        # 避免重复添加 handler
-        if self.logger.handlers:
-            return
+        # ---------------- 控制台 Handler ----------------
+        if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+            ch = logging.StreamHandler()
+            ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s][%(classname)s] %(message)s"))
+            ch.addFilter(cls.ColorFilter(classname))
+            logger.addHandler(ch)
 
-        # 控制台 Handler
-        ch = logging.StreamHandler()
-        ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s][%(classname)s] %(message)s"))
-        ch.addFilter(self)
-        self.logger.addHandler(ch)
+        # ---------------- 文件 Handler ----------------
+        today = datetime.now().strftime("%Y%m%d")
+        log_home = os.environ.get("LOG_HOME", "/tmp")
+        log_dir = os.path.join(log_home, project)
+        os.makedirs(log_dir, exist_ok=True)
+        log_file_path = os.path.join(log_dir, f"{project}_{today}.log")
 
-        # 文件 Handler（按项目存放）
-        log_home = os.environ.get("LOG_HOME")
-        if log_home:
-            try:
-                log_dir = os.path.join(log_home, project)
-                os.makedirs(log_dir, exist_ok=True)
+        # 每个项目共用一个 FileHandler
+        if project not in cls._file_handlers:
+            fh = logging.FileHandler(log_file_path, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s][%(classname)s] %(message)s"))
+            fh.addFilter(cls.PlainFilter(classname))  # 文件纯文本
+            cls._file_handlers[project] = fh
+            print(f"日志文件输出路径: {log_file_path}")
 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file_name = f"{project}_{timestamp}.log"
-                log_file_path = os.path.join(log_dir, log_file_name)
+        # 添加 FileHandler 到 logger（避免重复添加）
+        if cls._file_handlers[project] not in logger.handlers:
+            logger.addHandler(cls._file_handlers[project])
 
-                fh = logging.FileHandler(log_file_path, encoding="utf-8")
-                fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s][%(classname)s] %(message)s"))
-                fh.addFilter(self)  # 文件中也写入 classname（无彩色）
-                self.logger.addHandler(fh)
-            except Exception as e:
-                self.logger.warning(f"无法创建日志文件: {e}")
+        cls._loggers[logger_name] = logger
+        return logger
 
-    def filter(self, record):
-        """动态注入 classname + 彩色等级"""
-        record.classname = f"{Fore.BLUE}{self.classname}{Style.RESET_ALL}"
+    # ---------------- Filter ----------------
+    class ColorFilter(logging.Filter):
+        """控制台彩色输出"""
+        def __init__(self, classname):
+            super().__init__()
+            self.classname = classname
 
-        # level 彩色
-        level_color = self.LEVEL_COLOR.get(record.levelno, "")
-        record.levelname = f"{level_color}{record.levelname}{Style.RESET_ALL}"
+        def filter(self, record):
+            record.classname = f"{Fore.BLUE}{self.classname}{Style.RESET_ALL}"
+            color = LoggerManager._LEVEL_COLOR.get(record.levelno, "")
+            record.levelname = f"{color}{record.levelname}{Style.RESET_ALL}"
+            if record.levelno >= logging.WARNING:
+                record.msg = f"{color}{record.msg}{Style.RESET_ALL}"
+            return True
 
-        # 只有 >= WARNING 时，消息彩色
-        if record.levelno >= logging.WARNING:
-            record.msg = f"{level_color}{record.msg}{Style.RESET_ALL}"
+    class PlainFilter(logging.Filter):
+        """文件输出纯文本"""
+        def __init__(self, classname):
+            super().__init__()
+            self.classname = classname
 
-        return True
+        def filter(self, record):
+            record.classname = self.classname
+            # 恢复原始等级名
+            record.levelname = logging.getLevelName(record.levelno)
+            # 确保 msg 纯文本
+            if hasattr(record, "msg"):
+                # 如果 msg 是 ANSI 彩色的，去掉 ESC 序列
+                import re
+                ansi_escape = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
+                record.msg = ansi_escape.sub("", str(record.msg))
+            return True
 
-    # -----------------------
-    # 日志方法
-    # -----------------------
-    def debug(self, msg: str):
-        self.logger.debug(msg)
 
-    def info(self, msg: str):
-        self.logger.info(msg)
-
-    def warning(self, msg: str):
-        self.logger.warning(msg)
-
-    def error(self, msg: str):
-        self.logger.error(msg)
-
-    def critical(self, msg: str):
-        self.logger.critical(msg)
 
 # ======================================================
 # 配置加载

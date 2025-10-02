@@ -11,7 +11,10 @@
         "train",
         "--config",
         "${input:selectConfig}"
-      ]
+      ],
+      "env": {
+        "LOG_HOME": "/home/nick/logs"
+      }
     },
     {
       "name": "Python: Evaluate",
@@ -23,7 +26,10 @@
         "evaluate",
         "--config",
         "${input:selectConfig}"
-      ]
+      ],
+      "env": {
+        "LOG_HOME": "/home/nick/logs"
+      }
     }
   ],
   "inputs": [

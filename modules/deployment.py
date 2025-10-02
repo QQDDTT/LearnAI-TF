@@ -12,9 +12,9 @@ deploy/deployment.py
 - kwargs: 预留扩展参数，例如模型对象 model
 """
 
-from modules.utils import call_target, Logger
+from modules.utils import call_target, LoggerManager
 
-logger = Logger(__file__)
+logger = LoggerManager.get_logger(__file__)
 
 def deploy_onnx_server(config):
     """
