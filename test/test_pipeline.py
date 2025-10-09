@@ -9,7 +9,7 @@ from modules.model import build_model
 from modules.dataloader import build_dataloader
 from modules.train import train_model
 from modules.evaluation import evaluate_model
-from modules.export import export_onnx
+from modules.export import export_model
 from modules.deployment import deploy_onnx_server
 
 logger = LoggerManager.get_logger(__file__)
@@ -42,7 +42,7 @@ def run_pipeline(config_path: str):
 
     # ---------------- 导出 ----------------
     exp_config = config["export"]
-    export_onnx(exp_config, model_dict)
+    export_model(exp_config, model_dict)
     logger.info("Exporting model completed")
 
     # ---------------- 部署 ----------------

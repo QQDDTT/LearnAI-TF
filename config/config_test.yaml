@@ -114,8 +114,15 @@ stages:
             targets: labels
 
 export:
-  path: "outputs/onnx/test_model.onnx"
-  model_key: stage_test
+  reflection: torch.onnx.export
+  args:
+    model: generator       # 引用 model_dict 中的 "generator"
+    args: [ [1, 100] ]     # dummy input
+    f: outputs/onnx/generator.onnx
+    opset_version: 16
+    input_names: ["input"]
+    output_names: ["output"]
+
 
 deployment:
   host: "127.0.0.1"
