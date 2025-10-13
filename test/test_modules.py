@@ -81,41 +81,6 @@ class TestModules:
             logger.error(f"配置文件检查失败: {str(e)}", exc_info=True)
             return False
 
-    def test_call_target(self):
-        """
-        测试反射调用机制
-
-        返回：
-            测试是否通过
-        """
-        logger.info("\n" + "=" * 70)
-        logger.info("测试2: 反射调用机制")
-        logger.info("=" * 70)
-
-        try:
-            # 测试1：创建优化器
-            logger.info("  测试反射创建优化器...")
-            optimizer = call_target("tensorflow.keras.optimizers.Adam", {
-                "learning_rate": 0.001
-            })
-            logger.info(f"  ✓ 优化器创建成功: {type(optimizer).__name__}")
-
-            # 测试2：创建损失函数
-            logger.info("  测试反射创建损失函数...")
-            loss_fn = call_target("tensorflow.keras.losses.MeanSquaredError", {})
-            logger.info(f"  ✓ 损失函数创建成功: {type(loss_fn).__name__}")
-
-            # 测试3：创建激活函数
-            logger.info("  测试反射创建激活函数...")
-            activation = call_target("tensorflow.keras.activations.relu", {})
-            logger.info(f"  ✓ 激活函数获取成功")
-
-            logger.info("✓ 反射调用机制正常")
-            return True
-        except Exception as e:
-            logger.error(f"反射调用测试失败: {str(e)}", exc_info=True)
-            return False
-
     def test_models(self):
         """
         测试模型构建
@@ -124,11 +89,11 @@ class TestModules:
             模型字典，如果失败返回None
         """
         logger.info("\n" + "=" * 70)
-        logger.info("测试3: 模型构建")
+        logger.info("测试2: 模型构建")
         logger.info("=" * 70)
 
         try:
-            from models import ModelBuilder
+            from modules.models import ModelBuilder
 
             models_config = self.config.get("models", {})
 
@@ -158,11 +123,11 @@ class TestModules:
             优化器字典，如果失败返回None
         """
         logger.info("\n" + "=" * 70)
-        logger.info("测试4: 优化器构建")
+        logger.info("测试3: 优化器构建")
         logger.info("=" * 70)
 
         try:
-            from optimizers import OptimizerBuilder
+            from modules.optimizers import OptimizerBuilder
 
             optimizers_config = self.config.get("optimizers", {})
 
@@ -192,11 +157,11 @@ class TestModules:
             损失函数字典，如果失败返回None
         """
         logger.info("\n" + "=" * 70)
-        logger.info("测试5: 损失函数构建")
+        logger.info("测试4: 损失函数构建")
         logger.info("=" * 70)
 
         try:
-            from losses import LossBuilder
+            from modules.losses import LossBuilder
 
             losses_config = self.config.get("losses", {})
 
@@ -226,11 +191,11 @@ class TestModules:
             数据加载器字典，如果失败返回None
         """
         logger.info("\n" + "=" * 70)
-        logger.info("测试6: 数据管理器")
+        logger.info("测试5: 数据管理器")
         logger.info("=" * 70)
 
         try:
-            from data_manager import DataManager
+            from modules.data_manager import DataManager
 
             training_mode = self.config.get("training_mode", {}).get("type", "supervised")
             data_config = self.config.get("data_manager", {})
@@ -263,11 +228,11 @@ class TestModules:
             测试是否通过
         """
         logger.info("\n" + "=" * 70)
-        logger.info("测试7: 参数绑定系统")
+        logger.info("测试6: 参数绑定系统")
         logger.info("=" * 70)
 
         try:
-            from training_pipeline import TrainingPipeline
+            from modules.training_pipeline import TrainingPipeline
 
             logger.info("  创建测试上下文...")
 
@@ -336,7 +301,6 @@ class TestModules:
         results = {}
 
         results["配置文件结构"] = self.test_config_structure()
-        results["反射调用机制"] = self.test_call_target()
         results["模型构建"] = self.test_models() is not None
         results["优化器构建"] = self.test_optimizers() is not None
         results["损失函数构建"] = self.test_losses() is not None

@@ -9,7 +9,7 @@ data_manager.py - 数据管理
 
 from typing import Dict, Any, Optional, Iterator, Tuple
 import os
-from utils import LoggerManager, call_target
+from modules.utils import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 

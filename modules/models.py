@@ -9,7 +9,7 @@ models.py - 模型定义和生成
 
 from typing import Dict, Any, List, Optional
 import os
-from utils import LoggerManager, call_target
+from modules.utils import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 

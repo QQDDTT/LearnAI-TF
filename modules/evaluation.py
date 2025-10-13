@@ -9,7 +9,7 @@ evaluation.py - 模型评估
 
 from typing import Dict, Any, Optional, Tuple
 import time
-from utils import LoggerManager, call_target
+from modules.utils import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 

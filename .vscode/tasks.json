@@ -14,11 +14,11 @@
       "problemMatcher": []
     },
     {
-      "label": "Run Test Pipeline",
+      "label": "Run Test Modules",
       "type": "shell",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "test/test_pipeline.py",
+        "test/test_modules.py",
         "--config",
         "config_test.yaml"
       ],

@@ -9,7 +9,7 @@ training_pipeline.py - 训练流程执行
 
 from typing import Dict, Any, Optional
 import time
-from utils import LoggerManager, call_target
+from modules.utils import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 

@@ -8,7 +8,7 @@ losses.py - 损失函数定义和生成
 """
 
 from typing import Dict, Any
-from utils import LoggerManager, call_target
+from modules.utils import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 

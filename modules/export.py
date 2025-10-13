@@ -9,7 +9,7 @@ export.py - 模型导出
 
 from typing import Dict, Any
 import os
-from utils import LoggerManager, call_target
+from modules.utils import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 
