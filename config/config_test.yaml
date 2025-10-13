@@ -1,130 +1,167 @@
-stages:
-  - name: stage_test
-    description: "测试阶段：简单 MLP 模型"
-    model:
-      type: Functional
-      generator:
-        reflection: tensorflow.keras.Sequential
-        layers:
-          - reflection: tensorflow.keras.layers.Dense
-            args:
-              units: 128
-              activation: relu
-              input_shape: [100]
-          - reflection: tensorflow.keras.layers.Dense
-            args:
-              units: 784
-              activation: tanh
-              name: fake_image
-      discriminator:
-        reflection: tensorflow.keras.Sequential
-        layers:
-          - reflection: tensorflow.keras.layers.Dense
-            args:
-              units: 128
-              activation: relu
-              input_shape: [784]
-          - reflection: tensorflow.keras.layers.Dense
-            args:
-              units: 1
-              activation: sigmoid
-              name: validity
-      optimizers:
-        generator:
-          reflection: tensorflow.keras.optimizers.Adam
-          args:
-            learning_rate: 0.0002
-            beta_1: 0.5
-        discriminator:
-          reflection: tensorflow.keras.optimizers.Adam
-          args:
-            learning_rate: 0.0002
-            beta_1: 0.5
-      losses:
-        generator: tensorflow.keras.losses.BinaryCrossentropy
-        discriminator: tensorflow.keras.losses.BinaryCrossentropy
+# ============================================================
+# 测试配置文件
+# 用于测试各个模块的函数是否正常工作
+# ============================================================
 
-    data:
-      train:
-        reflection: modules.utils.build_csv_loader
+# 全局配置
+global:
+  name: "test_framework"
+  version: "1.0"
+  seed: 42
+
+# 测试模式：监督学习（最简单的情况）
+training_mode:
+  type: "supervised"
+  subtype: null
+
+# 模型定义 - 简单的MLP
+models:
+  # 简单的分类器
+  classifier:
+    type: "Functional"
+    reflection: tensorflow.keras.Sequential
+    layers:
+      - reflection: tensorflow.keras.layers.Dense
         args:
-          file_path: "data/train.csv"
-          batch_size: 64
-          shuffle: True
-      val:
-        reflection: modules.utils.build_web_dataset
+          units: 64
+          activation: relu
+          input_shape: [10]
+
+      - reflection: tensorflow.keras.layers.Dense
         args:
-          host: "127.0.0.1"
-          port: 5000
-          endpoint_path: "/val_csv"
-          payload: null
-          batch_size: 64
-          shuffle: False
-      test:
-        reflection: modules.utils.build_csv_loader   # 修改为 CSV Loader 或自定义 Loader
+          units: 32
+          activation: relu
+
+      - reflection: tensorflow.keras.layers.Dense
         args:
-          file_path: "data/test.csv"
-          batch_size: 32
-          shuffle: False
+          units: 2
+          activation: softmax
+          name: output
 
-    training:
-      epochs: 3
-      steps:
-        - reflection: modules.losses.compute_loss
-          args:
-            model: generator
-            loss_fn: gen_loss_fn
-            x: inputs
-            y: labels
+# 优化器定义
+optimizers:
+  classifier_opt:
+    reflection: tensorflow.keras.optimizers.Adam
+    args:
+      learning_rate: 0.001
+      beta_1: 0.9
 
-        - reflection: modules.optimizer.apply_gradients
-          args:
-            optimizer: gen_optimizer
-            loss: last_result
+# 损失函数定义
+losses:
+  cross_entropy:
+    reflection: tensorflow.keras.losses.CategoricalCrossentropy
+    args: {}
 
-        - reflection: modules.losses.compute_loss
-          args:
-            model: discriminator
-            loss_fn: dis_loss_fn
-            x: fake_images
-            y: fake_labels
+# 数据管理
+data_manager:
+  supervised_source:
+    # 使用小数据集进行测试
+    train:
+      reflection: modules.utils.build_csv_loader
+      args:
+        file_path: "data/train_test.csv"
+        batch_size: 16
+        shuffle: true
 
-        - reflection: modules.optimizer.apply_gradients
-          args:
-            optimizer: dis_optimizer
-            loss: last_result
+    val:
+      reflection: modules.utils.build_csv_loader
+      args:
+        file_path: "data/val_test.csv"
+        batch_size: 16
+        shuffle: false
+
+    test:
+      reflection: modules.utils.build_csv_loader
+      args:
+        file_path: "data/test_test.csv"
+        batch_size: 16
+        shuffle: false
+
+# 训练流程 - 监督学习
+training_pipeline:
+  supervised:
+    loop_type: "epoch_batch"
+
+    parameters:
+      epochs: 2  # 仅训练2个epoch用于测试
+      steps_per_epoch: null
+
+    step_sequence:
+      # 获取batch数据
+      - name: "fetch_batch"
+        reflection: modules.data.get_batch
+        args:
+          loader: "train_loader"
+
+      # 前向传播
+      - name: "forward_pass"
+        reflection: modules.inference.forward
+        args:
+          model: "classifier"
+          inputs: "batch.x"
+
+      # 计算损失
+      - name: "compute_loss"
+        reflection: modules.losses.compute_supervised_loss
+        args:
+          predictions: "last_result"
+          targets: "batch.y"
+          loss_fn: "cross_entropy"
+
+      # 反向传播
+      - name: "backward_pass"
+        reflection: modules.optimizer.compute_gradients
+        args:
+          loss: "last_result"
+          model: "classifier"
+
+      # 更新参数
+      - name: "update_params"
+        reflection: modules.optimizer.apply_gradients
+        args:
+          optimizer: "classifier_opt"
+          gradients: "last_result"
+          model: "classifier"
+
+    loop_condition:
+      check_type: "epoch_based"
+      max_epochs: "config.training_pipeline.supervised.parameters.epochs"
 
     evaluation:
-      dataset: val
-      steps:
-        - reflection: modules.inference.forward
-          arguments:
-            model: generator
-            inputs: inputs
+      frequency: "epoch"
+      eval_split: "val"
 
-        - reflection: modules.losses.compute_loss
-          arguments:
-            predictions: last_result
-            targets: labels
-            loss_fn: gen_loss_fn
+# 评估流程
+evaluation:
+  supervised_eval:
+    frequency: "epoch"
+    split: "val"
 
-        - reflection: modules.metrics.compute_accuracy
-          arguments:
-            predictions: last_result
-            targets: labels
+    steps:
+      - name: "forward_pass"
+        reflection: modules.inference.forward
+        args:
+          model: "classifier"
+          inputs: "batch.x"
 
+      - name: "compute_metrics"
+        reflection: modules.metrics.compute_metrics
+        args:
+          predictions: "last_result"
+          targets: "batch.y"
+          metrics: ["accuracy"]
+
+# 导出配置
 export:
-  reflection: torch.onnx.export
+  reflection: tensorflow.keras.models.save_model
   args:
-    model: generator       # 引用 model_dict 中的 "generator"
-    args: [ [1, 100] ]     # dummy input
-    f: outputs/onnx/generator.onnx
-    opset_version: 16
-    input_names: ["input"]
-    output_names: ["output"]
+    model: "classifier"
+    filepath: "outputs/onnx/test_model.keras"
+    save_format: "keras"
 
-
+# 部署配置
 deployment:
   host: "127.0.0.1"
   port: 9000
-  model_key: stage_test
+  model_key: "classifier"
+  service_type: "onnx_inference"
