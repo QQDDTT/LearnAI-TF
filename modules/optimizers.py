@@ -1,278 +1,480 @@
 # -*- coding: utf-8 -*-
 """
-optimizers.py - 优化器定义和生成
-功能：
-  - 通过反射调用从配置文件生成优化器
-  - 支持Adam、SGD、RMSprop等各种优化器
-  - 为不同的模型配置不同的学习率和参数
+modules/optimizers.py
+优化器模块：
+- 构建优化器
+- 学习率调度
+- 优化器管理
 """
 
+import tensorflow as tf
 from typing import Dict, Any
-from modules.utils import LoggerManager, call_target
+from common.common import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 
 
-class OptimizerBuilder:
+# ======================================================
+# 主构建函数
+# ======================================================
+def build_all_optimizers(config: Dict) -> Dict[str, tf.keras.optimizers.Optimizer]:
     """
-    优化器构建器：
-    - 根据配置文件动态生成优化器
-    - 使用反射调用TensorFlow的Optimizer API
-    - 支持任意优化器类型
+    构建所有优化器
+
+    参数:
+        config: optimizers配置
+
+    返回:
+        dict: 优化器字典 {optimizer_name: optimizer}
+
+    示例:
+        >>> config = {
+        >>>     "adam": {
+        >>>         "reflection": "tensorflow.keras.optimizers.Adam",
+        >>>         "args": {"learning_rate": 0.001}
+        >>>     }
+        >>> }
+        >>> opts = build_all_optimizers(config)
     """
+    optimizer_dict = {}
 
-    def build_all(self, optimizers_config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建所有配置中的优化器
-
-        参数：
-            optimizers_config: 配置文件中的optimizers部分
-                {
-                    "generator_opt": {...},
-                    "discriminator_opt": {...},
-                    "actor_opt": {...}
-                }
-        返回：
-            {优化器名: 优化器实例}
-        """
-        optimizers = {}
-
-        if not optimizers_config:
-            logger.warning("优化器配置为空")
-            return optimizers
-
-        for opt_name, opt_cfg in optimizers_config.items():
-            logger.info(f"构建优化器: {opt_name}")
-            try:
-                optimizer = self.build_single(opt_name, opt_cfg)
-                optimizers[opt_name] = optimizer
-                logger.info(f"优化器 {opt_name} 构建成功")
-            except Exception as e:
-                logger.error(f"优化器 {opt_name} 构建失败: {str(e)}", exc_info=True)
-                raise
-
-        return optimizers
-
-    def build_single(self, opt_name: str, opt_cfg: Dict[str, Any]) -> Any:
-        """
-        构建单个优化器
-
-        参数：
-            opt_name: 优化器名称
-            opt_cfg: 优化器配置
-                {
-                    "reflection": "tensorflow.keras.optimizers.Adam",
-                    "args": {
-                        "learning_rate": 0.001,
-                        "beta_1": 0.9,
-                        ...
-                    }
-                }
-        返回：
-            优化器实例
-        """
-        reflection = opt_cfg.get("reflection")
-        args = opt_cfg.get("args", {})
-
-        if not reflection:
-            raise ValueError(f"优化器 {opt_name} 缺少reflection字段")
-
-        logger.debug(f"创建优化器: {reflection}, 参数: {args}")
+    for optimizer_name, optimizer_config in config.items():
+        logger.info(f"构建优化器: {optimizer_name}")
 
         try:
-            # 通过反射调用优化器的构造函数
-            optimizer = call_target(reflection, args)
-            logger.debug(f"优化器 {opt_name} 创建成功")
-            return optimizer
-        except Exception as e:
-            logger.error(f"优化器创建失败: {str(e)}", exc_info=True)
-            raise
+            optimizer = call_target(
+                optimizer_config["reflection"],
+                optimizer_config.get("args", {})
+            )
 
+            optimizer_dict[optimizer_name] = optimizer
 
-class OptimizerManager:
-    """
-    优化器管理器：
-    - 管理优化器的学习率调整
-    - 实现学习率衰减
-    - 保存和加载优化器状态
-    """
-
-    def __init__(self):
-        """初始化优化器管理器"""
-        self.learning_rate_history = []
-
-    def set_learning_rate(self, optimizer: Any, learning_rate: float):
-        """
-        设置优化器的学习率
-
-        参数：
-            optimizer: 优化器实例
-            learning_rate: 新的学习率
-        """
-        logger.info(f"设置学习率: {learning_rate}")
-
-        try:
-            # TensorFlow 2.x: 直接赋值learning_rate属性
+            # 打印优化器信息
+            logger.debug(f"  类型: {type(optimizer).__name__}")
             if hasattr(optimizer, 'learning_rate'):
-                optimizer.learning_rate = learning_rate
-                logger.debug(f"学习率已更新")
-            else:
-                logger.warning(f"优化器没有learning_rate属性")
+                lr = optimizer.learning_rate
+                if isinstance(lr, tf.keras.optimizers.schedules.LearningRateSchedule):
+                    logger.debug(f"  学习率: 动态调度")
+                else:
+                    logger.debug(f"  学习率: {float(lr.numpy())}")
+
         except Exception as e:
-            logger.error(f"设置学习率失败: {str(e)}")
+            logger.error(f"构建优化器 {optimizer_name} 失败: {str(e)}")
             raise
 
-    def decay_learning_rate(self, optimizer: Any, decay_factor: float = 0.9, min_lr: float = 1e-6):
+    return optimizer_dict
+
+
+# ======================================================
+# 学习率调度器
+# ======================================================
+class CustomLearningRateScheduler:
+    """
+    自定义学习率调度器
+    支持多种调度策略
+
+    参数:
+        schedule_type: 调度类型 (step/exponential/cosine/warmup/polynomial)
+        initial_lr: 初始学习率
+        **kwargs: 其他参数
+
+    示例:
+        >>> scheduler = CustomLearningRateScheduler(
+        >>>     schedule_type="cosine",
+        >>>     initial_lr=0.001,
+        >>>     total_steps=10000
+        >>> )
+        >>> lr = scheduler(step=1000)
+    """
+    def __init__(self, schedule_type: str, initial_lr: float, **kwargs):
+        self.schedule_type = schedule_type
+        self.initial_lr = initial_lr
+        self.kwargs = kwargs
+
+        logger.info(f"创建学习率调度器: {schedule_type}")
+
+    def __call__(self, step: int) -> float:
         """
-        衰减学习率（乘以衰减因子）
+        计算当前步的学习率
 
-        参数：
-            optimizer: 优化器实例
-            decay_factor: 衰减因子（通常0.9, 0.95等）
-            min_lr: 最小学习率
+        参数:
+            step: 当前训练步数
+
+        返回:
+            学习率
         """
-        try:
-            current_lr = self.get_learning_rate(optimizer)
-            if current_lr is None:
-                logger.warning("无法获取当前学习率")
-                return
+        if self.schedule_type == "step":
+            return self._step_decay(step)
+        elif self.schedule_type == "exponential":
+            return self._exponential_decay(step)
+        elif self.schedule_type == "cosine":
+            return self._cosine_decay(step)
+        elif self.schedule_type == "warmup":
+            return self._warmup_cosine_decay(step)
+        elif self.schedule_type == "polynomial":
+            return self._polynomial_decay(step)
+        elif self.schedule_type == "constant":
+            return self.initial_lr
+        else:
+            logger.warning(f"未知的调度类型: {self.schedule_type}，使用常数学习率")
+            return self.initial_lr
 
-            new_lr = max(current_lr * decay_factor, min_lr)
-            self.set_learning_rate(optimizer, new_lr)
-
-            self.learning_rate_history.append({
-                "old_lr": current_lr,
-                "new_lr": new_lr
-            })
-
-            logger.info(f"学习率衰减: {current_lr:.6f} -> {new_lr:.6f}")
-        except Exception as e:
-            logger.error(f"学习率衰减失败: {str(e)}")
-
-    def get_learning_rate(self, optimizer: Any) -> float:
+    def _step_decay(self, step: int) -> float:
         """
-        获取优化器的学习率
+        阶梯式衰减
+        每隔一定步数，学习率乘以衰减率
 
-        参数：
-            optimizer: 优化器实例
-        返回：
-            当前学习率
+        参数:
+            step: 当前步数
+
+        返回:
+            学习率
         """
-        try:
-            if not hasattr(optimizer, 'learning_rate'):
-                logger.warning("优化器没有learning_rate属性")
-                return None
+        drop_rate = self.kwargs.get("drop_rate", 0.5)
+        drop_every = self.kwargs.get("drop_every", 1000)
 
-            lr = optimizer.learning_rate
+        drops = step // drop_every
+        return self.initial_lr * (drop_rate ** drops)
 
-            # 处理不同的学习率类型
-            if hasattr(lr, 'numpy'):
-                return float(lr.numpy())
-            elif callable(lr):
-                # 某些情况下learning_rate可能是可调用的
-                return float(lr())
-            else:
-                return float(lr)
-        except Exception as e:
-            logger.warning(f"获取学习率失败: {str(e)}")
-            return None
-
-    def get_config(self, optimizer: Any) -> Dict[str, Any]:
+    def _exponential_decay(self, step: int) -> float:
         """
-        获取优化器配置
+        指数衰减
+        学习率按指数函数衰减
 
-        参数：
-            optimizer: 优化器实例
-        返回：
-            配置字典
+        参数:
+            step: 当前步数
+
+        返回:
+            学习率
         """
-        try:
-            if hasattr(optimizer, 'get_config'):
-                return optimizer.get_config()
-            else:
-                logger.warning("优化器没有get_config方法")
-                return {}
-        except Exception as e:
-            logger.error(f"获取优化器配置失败: {str(e)}")
-            return {}
+        decay_rate = self.kwargs.get("decay_rate", 0.96)
+        decay_steps = self.kwargs.get("decay_steps", 1000)
+        staircase = self.kwargs.get("staircase", False)
 
-    def save_optimizer_state(self, optimizer: Any, filepath: str):
+        if staircase:
+            return self.initial_lr * (decay_rate ** (step // decay_steps))
+        else:
+            return self.initial_lr * (decay_rate ** (step / decay_steps))
+
+    def _cosine_decay(self, step: int) -> float:
         """
-        保存优化器状态（权重和学习率等）
+        余弦衰减
+        使用余弦函数平滑衰减学习率
 
-        参数：
-            optimizer: 优化器实例
-            filepath: 保存路径
+        参数:
+            step: 当前步数
+
+        返回:
+            学习率
         """
-        import pickle
-        import os
+        import math
 
-        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+        total_steps = self.kwargs.get("total_steps", 10000)
+        min_lr = self.kwargs.get("min_lr", 0.0)
 
-        try:
-            state = {
-                'learning_rate': self.get_learning_rate(optimizer),
-                'config': self.get_config(optimizer),
-                'weights': optimizer.get_weights() if hasattr(optimizer, 'get_weights') else None
+        progress = min(step / total_steps, 1.0)
+        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+
+        return min_lr + (self.initial_lr - min_lr) * cosine_decay
+
+    def _warmup_cosine_decay(self, step: int) -> float:
+        """
+        预热 + 余弦衰减
+        前期线性增长，后期余弦衰减
+
+        参数:
+            step: 当前步数
+
+        返回:
+            学习率
+        """
+        import math
+
+        warmup_steps = self.kwargs.get("warmup_steps", 1000)
+        total_steps = self.kwargs.get("total_steps", 10000)
+        min_lr = self.kwargs.get("min_lr", 0.0)
+
+        if step < warmup_steps:
+            # 线性预热
+            return self.initial_lr * (step / warmup_steps)
+        else:
+            # 余弦衰减
+            progress = (step - warmup_steps) / (total_steps - warmup_steps)
+            progress = min(progress, 1.0)
+            cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+            return min_lr + (self.initial_lr - min_lr) * cosine_decay
+
+    def _polynomial_decay(self, step: int) -> float:
+        """
+        多项式衰减
+        学习率按多项式函数衰减
+
+        参数:
+            step: 当前步数
+
+        返回:
+            学习率
+        """
+        decay_steps = self.kwargs.get("decay_steps", 10000)
+        end_lr = self.kwargs.get("end_lr", 0.0001)
+        power = self.kwargs.get("power", 1.0)
+
+        step = min(step, decay_steps)
+        return (self.initial_lr - end_lr) * ((1 - step / decay_steps) ** power) + end_lr
+
+
+def create_lr_schedule(
+    schedule_type: str,
+    initial_lr: float,
+    **kwargs
+) -> tf.keras.optimizers.schedules.LearningRateSchedule:
+    """
+    创建TensorFlow原生学习率调度器
+
+    参数:
+        schedule_type: 调度类型
+        initial_lr: 初始学习率
+        **kwargs: 其他参数
+
+    返回:
+        学习率调度器
+
+    示例:
+        >>> schedule = create_lr_schedule(
+        >>>     "exponential",
+        >>>     initial_lr=0.001,
+        >>>     decay_steps=1000,
+        >>>     decay_rate=0.96
+        >>> )
+    """
+    if schedule_type == "exponential":
+        return tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=initial_lr,
+            decay_steps=kwargs.get("decay_steps", 1000),
+            decay_rate=kwargs.get("decay_rate", 0.96),
+            staircase=kwargs.get("staircase", False)
+        )
+
+    elif schedule_type == "cosine":
+        return tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=initial_lr,
+            decay_steps=kwargs.get("decay_steps", 10000),
+            alpha=kwargs.get("alpha", 0.0)
+        )
+
+    elif schedule_type == "cosine_restart":
+        return tf.keras.optimizers.schedules.CosineDecayRestarts(
+            initial_learning_rate=initial_lr,
+            first_decay_steps=kwargs.get("first_decay_steps", 1000),
+            t_mul=kwargs.get("t_mul", 2.0),
+            m_mul=kwargs.get("m_mul", 1.0),
+            alpha=kwargs.get("alpha", 0.0)
+        )
+
+    elif schedule_type == "piecewise":
+        return tf.keras.optimizers.schedules.PiecewiseConstantDecay(
+            boundaries=kwargs.get("boundaries", [1000, 5000]),
+            values=kwargs.get("values", [initial_lr, initial_lr * 0.1, initial_lr * 0.01])
+        )
+
+    elif schedule_type == "polynomial":
+        return tf.keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=initial_lr,
+            decay_steps=kwargs.get("decay_steps", 10000),
+            end_learning_rate=kwargs.get("end_learning_rate", 0.0001),
+            power=kwargs.get("power", 1.0)
+        )
+
+    elif schedule_type == "inverse_time":
+        return tf.keras.optimizers.schedules.InverseTimeDecay(
+            initial_learning_rate=initial_lr,
+            decay_steps=kwargs.get("decay_steps", 1000),
+            decay_rate=kwargs.get("decay_rate", 0.5)
+        )
+
+    else:
+        raise ValueError(f"未知的学习率调度类型: {schedule_type}")
+
+
+# ======================================================
+# 优化器工具函数
+# ======================================================
+def get_optimizer_config(optimizer: tf.keras.optimizers.Optimizer) -> Dict:
+    """
+    获取优化器配置
+
+    参数:
+        optimizer: 优化器实例
+
+    返回:
+        配置字典
+
+    示例:
+        >>> config = get_optimizer_config(optimizer)
+        >>> print(config)
+    """
+    return optimizer.get_config()
+
+
+def set_learning_rate(optimizer: tf.keras.optimizers.Optimizer, lr: float) -> None:
+    """
+    设置优化器学习率
+
+    参数:
+        optimizer: 优化器实例
+        lr: 新的学习率
+
+    示例:
+        >>> set_learning_rate(optimizer, 0.0001)
+    """
+    if hasattr(optimizer, 'learning_rate'):
+        if isinstance(optimizer.learning_rate, tf.Variable):
+            optimizer.learning_rate.assign(lr)
+            logger.info(f"学习率更新为: {lr}")
+        else:
+            logger.warning("学习率是调度器，无法直接设置")
+    else:
+        logger.error("优化器没有learning_rate属性")
+
+
+def get_learning_rate(optimizer: tf.keras.optimizers.Optimizer) -> float:
+    """
+    获取当前学习率
+
+    参数:
+        optimizer: 优化器实例
+
+    返回:
+        当前学习率
+
+    示例:
+        >>> lr = get_learning_rate(optimizer)
+        >>> print(f"当前学习率: {lr}")
+    """
+    if hasattr(optimizer, 'learning_rate'):
+        lr = optimizer.learning_rate
+        if isinstance(lr, tf.keras.optimizers.schedules.LearningRateSchedule):
+            # 如果是调度器，返回当前步的学习率
+            return float(lr(optimizer.iterations).numpy())
+        else:
+            return float(lr.numpy())
+    else:
+        logger.error("优化器没有learning_rate属性")
+        return 0.0
+
+
+def apply_gradient_clipping(
+    gradients: list,
+    clip_type: str = "norm",
+    clip_value: float = 1.0
+) -> list:
+    """
+    应用梯度裁剪
+
+    参数:
+        gradients: 梯度列表
+        clip_type: 裁剪类型 ("norm" 或 "value")
+        clip_value: 裁剪值
+
+    返回:
+        裁剪后的梯度列表
+
+    示例:
+        >>> clipped_grads = apply_gradient_clipping(gradients, "norm", 1.0)
+    """
+    if clip_type == "norm":
+        # 按范数裁剪
+        clipped_gradients, _ = tf.clip_by_global_norm(gradients, clip_value)
+        return clipped_gradients
+    elif clip_type == "value":
+        # 按值裁剪
+        return [tf.clip_by_value(g, -clip_value, clip_value) for g in gradients]
+    else:
+        logger.warning(f"未知的裁剪类型: {clip_type}，不裁剪")
+        return gradients
+
+
+def compute_gradient_norm(gradients: list) -> float:
+    """
+    计算梯度的全局范数
+
+    参数:
+        gradients: 梯度列表
+
+    返回:
+        梯度范数
+
+    示例:
+        >>> grad_norm = compute_gradient_norm(gradients)
+        >>> print(f"梯度范数: {grad_norm}")
+    """
+    return float(tf.linalg.global_norm(gradients).numpy())
+
+
+# ======================================================
+# 优化器预设配置
+# ======================================================
+def get_optimizer_preset(preset_name: str, learning_rate: float = 0.001) -> Dict:
+    """
+    获取优化器预设配置
+
+    参数:
+        preset_name: 预设名称 (adam/sgd/rmsprop/adamw/adagrad)
+        learning_rate: 学习率
+
+    返回:
+        优化器配置字典
+
+    示例:
+        >>> config = get_optimizer_preset("adam", 0.001)
+    """
+    presets = {
+        "adam": {
+            "reflection": "tensorflow.keras.optimizers.Adam",
+            "args": {
+                "learning_rate": learning_rate,
+                "beta_1": 0.9,
+                "beta_2": 0.999,
+                "epsilon": 1e-7
             }
+        },
+        "sgd": {
+            "reflection": "tensorflow.keras.optimizers.SGD",
+            "args": {
+                "learning_rate": learning_rate,
+                "momentum": 0.9,
+                "nesterov": True
+            }
+        },
+        "rmsprop": {
+            "reflection": "tensorflow.keras.optimizers.RMSprop",
+            "args": {
+                "learning_rate": learning_rate,
+                "rho": 0.9,
+                "momentum": 0.0,
+                "epsilon": 1e-7
+            }
+        },
+        "adamw": {
+            "reflection": "tensorflow.keras.optimizers.AdamW",
+            "args": {
+                "learning_rate": learning_rate,
+                "weight_decay": 0.01,
+                "beta_1": 0.9,
+                "beta_2": 0.999
+            }
+        },
+        "adagrad": {
+            "reflection": "tensorflow.keras.optimizers.Adagrad",
+            "args": {
+                "learning_rate": learning_rate,
+                "initial_accumulator_value": 0.1,
+                "epsilon": 1e-7
+            }
+        }
+    }
 
-            with open(filepath, 'wb') as f:
-                pickle.dump(state, f)
+    if preset_name not in presets:
+        raise ValueError(f"未知的预设: {preset_name}，可用: {list(presets.keys())}")
 
-            logger.info(f"优化器状态已保存到: {filepath}")
-        except Exception as e:
-            logger.error(f"保存优化器状态失败: {str(e)}")
-            raise
-
-    def load_optimizer_state(self, optimizer: Any, filepath: str):
-        """
-        加载优化器状态
-
-        参数：
-            optimizer: 优化器实例
-            filepath: 加载路径
-        """
-        import pickle
-
-        try:
-            with open(filepath, 'rb') as f:
-                state = pickle.load(f)
-
-            # 恢复学习率
-            if state.get('learning_rate'):
-                self.set_learning_rate(optimizer, state['learning_rate'])
-
-            # 恢复权重
-            if state.get('weights') and hasattr(optimizer, 'set_weights'):
-                optimizer.set_weights(state['weights'])
-
-            logger.info(f"优化器状态已从 {filepath} 加载")
-        except Exception as e:
-            logger.error(f"加载优化器状态失败: {str(e)}")
-            raise
-
-    def print_optimizer_info(self, optimizer: Any):
-        """
-        打印优化器信息
-
-        参数：
-            optimizer: 优化器实例
-        """
-        logger.info("=" * 60)
-        logger.info("优化器信息")
-        logger.info("=" * 60)
-
-        try:
-            logger.info(f"优化器类型: {type(optimizer).__name__}")
-
-            lr = self.get_learning_rate(optimizer)
-            if lr is not None:
-                logger.info(f"学习率: {lr}")
-
-            config = self.get_config(optimizer)
-            if config:
-                logger.info("配置:")
-                for key, value in config.items():
-                    logger.info(f"  {key}: {value}")
-        except Exception as e:
-            logger.warning(f"打印优化器信息失败: {str(e)}")
+    return presets[preset_name]

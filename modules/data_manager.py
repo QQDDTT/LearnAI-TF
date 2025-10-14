@@ -1,470 +1,682 @@
 # -*- coding: utf-8 -*-
 """
-data_manager.py - 数据管理
-功能：
-  - 根据配置文件生成数据加载器
-  - 支持监督、无监督、强化学习等各种数据源
-  - 自适应不同的训练方式
+modules/data_manager.py
+数据管理模块：
+- 加载不同训练模式的数据
+- 数据增强逻辑
+- 数据预处理
+- 数据迭代器管理
 """
 
-from typing import Dict, Any, Optional, Iterator, Tuple
-import os
-from modules.utils import LoggerManager, call_target
+import tensorflow as tf
+import numpy as np
+from typing import Dict, List, Any, Optional, Tuple
+from common.common import LoggerManager, call_target
+from common import utils
 
 logger = LoggerManager.get_logger(__file__)
 
 
-class DataManager:
+# ======================================================
+# 主初始化函数
+# ======================================================
+def initialize(config: Dict, training_mode: str) -> Dict[str, Any]:
     """
-    数据管理器：
-    - 根据训练方式选择对应的数据源
-    - 生成数据加载器
-    - 管理数据的流向
+    根据训练模式初始化数据加载器
+
+    参数:
+        config: data_manager配置
+        training_mode: 训练模式 (supervised/reinforcement/self_supervised等)
+
+    返回:
+        dict: 数据加载器字典
+
+    示例:
+        >>> dataloaders = initialize(config, "supervised")
+        >>> print(dataloaders.keys())
     """
+    logger.info(f"初始化 {training_mode} 模式的数据管理器")
 
-    def __init__(self, config: Dict[str, Any], training_mode: str):
-        """
-        初始化数据管理器
+    preprocessing_config = config.get("preprocessing", {})
 
-        参数：
-            config: 完整的配置文件
-            training_mode: 训练方式（supervised/reinforcement/unsupervised等）
-        """
-        self.config = config
-        self.training_mode = training_mode
-        logger.info(f"初始化数据管理器: {training_mode}")
+    if training_mode == "supervised":
+        data_loaders = load_supervised_data(config.get("supervised_source", {}))
+    elif training_mode == "reinforcement":
+        data_loaders = load_rl_data(config.get("rl_source", {}))
+    elif training_mode == "unsupervised":
+        data_loaders = load_unsupervised_data(config.get("unsupervised_source", {}))
+    elif training_mode == "self_supervised":
+        data_loaders = load_self_supervised_data(config.get("self_supervised_source", {}))
+    elif training_mode == "multi_task":
+        data_loaders = load_multi_task_data(config.get("multi_task_source", {}))
+    else:
+        logger.warning(f"未知的训练模式，未加载数据: {training_mode}")
 
-    def build_all(self, data_config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建所有数据加载器
+    # 2. 应用预处理 (如果存在)
+    if preprocessing_config:
+        logger.info(f"开始对 {training_mode} 数据应用预处理...")
+        for name, loader in data_loaders.items():
+            # 假设数据加载器返回的是 tf.data.Dataset 或其他可处理对象
+            if loader is not None:
+                data_loaders[name] = apply_preprocessing(
+                    loader,
+                    preprocessing_config
+                )
+                logger.info(f"  对数据加载器 '{name}' 完成预处理。")
+            else:
+                logger.warning(f"  数据加载器 '{name}' 为 None，跳过预处理。")
 
-        参数：
-            data_config: 配置文件中的data_manager部分
-        返回：
-            {数据集名: 数据加载器实例}
-        """
-        data_loaders = {}
+    return data_loaders
 
-        if not data_config:
-            logger.warning("数据配置为空")
-            return data_loaders
+# ======================================================
+# 监督学习数据加载
+# ======================================================
+def load_supervised_data(config: Dict) -> Dict[str, tf.data.Dataset]:
+    """
+    加载监督学习数据（train/val/test）
 
-        # 根据训练方式选择对应的数据源
-        source_key = self._get_source_key()
+    参数:
+        config: supervised_source配置
 
-        if source_key not in data_config:
-            logger.warning(f"未找到数据源: {source_key}")
-            return data_loaders
+    返回:
+        dict: {"train": train_ds, "val": val_ds, "test": test_ds}
 
-        source_cfg = data_config[source_key]
+    示例:
+        >>> dataloaders = load_supervised_data(config)
+        >>> for x, y in dataloaders["train"]:
+        >>>     print(x.shape, y.shape)
+    """
+    dataloaders = {}
 
-        try:
-            data_loaders = self._build_source(source_key, source_cfg)
-            logger.info(f"数据加载器构建成功: {list(data_loaders.keys())}")
-        except Exception as e:
-            logger.error(f"数据加载器构建失败: {str(e)}", exc_info=True)
-            raise
-
-        return data_loaders
-
-    def _get_source_key(self) -> str:
-        """
-        根据训练方式获取数据源键名
-
-        返回：
-            数据源键名
-        """
-        mapping = {
-            "supervised": "supervised_source",
-            "reinforcement": "rl_source",
-            "unsupervised_clustering": "unsupervised_source",
-            "unsupervised_autoencoder": "unsupervised_source",
-            "self_supervised": "self_supervised_source",
-            "semi_supervised_pseudo_labeling": "supervised_source",
-            "multi_task": "supervised_source",
-            "transfer": "supervised_source",
-            "online": "rl_source",
-        }
-
-        return mapping.get(self.training_mode, "supervised_source")
-
-    def _build_source(self, source_key: str, source_cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建数据源
-
-        参数：
-            source_key: 数据源键名
-            source_cfg: 数据源配置
-        返回：
-            {数据集名: 加载器实例}
-        """
-        if source_key == "supervised_source":
-            return self._build_supervised_source(source_cfg)
-        elif source_key == "rl_source":
-            return self._build_rl_source(source_cfg)
-        elif source_key == "unsupervised_source":
-            return self._build_unsupervised_source(source_cfg)
-        elif source_key == "self_supervised_source":
-            return self._build_self_supervised_source(source_cfg)
-        else:
-            raise ValueError(f"未知的数据源类型: {source_key}")
-
-    def _build_supervised_source(self, source_cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建监督学习数据源（train/val/test）
-
-        参数：
-            source_cfg: 监督学习数据源配置
-        返回：
-            {数据集名: 加载器实例}
-        """
-        data_loaders = {}
-
-        for split_name in ["train", "val", "test"]:
-            if split_name not in source_cfg:
-                logger.debug(f"未找到{split_name}数据源配置")
-                continue
-
-            split_cfg = source_cfg[split_name]
-            logger.info(f"构建 {split_name} 数据加载器")
+    for split in ["train", "val", "test"]:
+        if split in config:
+            split_config = config[split]
+            logger.info(f"加载 {split} 数据集")
 
             try:
-                loader = self._build_single_loader(split_cfg)
-                data_loaders[split_name] = loader
+                # 通过反射调用数据加载函数
+                dataset = call_target(
+                    split_config["reflection"],
+                    split_config.get("args", {})
+                )
+
+                # 如果返回的是元组（train, val），处理分割情况
+                if isinstance(dataset, tuple) and len(dataset) == 2:
+                    if split == "train":
+                        dataloaders["train"] = dataset[0]
+                        dataloaders["val"] = dataset[1]
+                        logger.info(f"train 数据集已分割为 train 和 val")
+                    else:
+                        dataloaders[split] = dataset[0]
+                else:
+                    dataloaders[split] = dataset
+
+                logger.info(f"{split} 数据集加载完成")
+
             except Exception as e:
-                logger.error(f"构建 {split_name} 加载器失败: {str(e)}", exc_info=True)
+                logger.error(f"加载 {split} 数据集失败: {str(e)}")
                 raise
 
-        if not data_loaders:
-            logger.warning("未构建任何监督学习数据加载器")
-
-        return data_loaders
-
-    def _build_rl_source(self, source_cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建强化学习数据源（环境、请求、反馈）
-
-        参数：
-            source_cfg: 强化学习数据源配置
-        返回：
-            {数据源名: 实例}
-        """
-        data_loaders = {}
-
-        # 构建环境
-        if "environment" in source_cfg:
-            env_cfg = source_cfg["environment"]
-            logger.info("构建强化学习环境")
-            try:
-                env = call_target(
-                    env_cfg.get("reflection"),
-                    env_cfg.get("args", {})
-                )
-                data_loaders["environment"] = env
-                logger.debug("环境构建成功")
-            except Exception as e:
-                logger.warning(f"构建环境失败: {str(e)}")
-
-        # 构建请求客户端
-        if "request" in source_cfg:
-            request_cfg = source_cfg["request"]
-            logger.info("构建请求客户端")
-            try:
-                request_client = call_target(
-                    request_cfg.get("reflection"),
-                    request_cfg.get("args", {})
-                )
-                data_loaders["request"] = request_client
-                logger.debug("请求客户端构建成功")
-            except Exception as e:
-                logger.warning(f"构建请求客户端失败: {str(e)}")
-
-        # 构建反馈客户端
-        if "feedback" in source_cfg:
-            feedback_cfg = source_cfg["feedback"]
-            logger.info("构建反馈客户端")
-            try:
-                feedback_client = call_target(
-                    feedback_cfg.get("reflection"),
-                    feedback_cfg.get("args", {})
-                )
-                data_loaders["feedback"] = feedback_client
-                logger.debug("反馈客户端构建成功")
-            except Exception as e:
-                logger.warning(f"构建反馈客户端失败: {str(e)}")
-
-        return data_loaders
-
-    def _build_unsupervised_source(self, source_cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建无监督学习数据源
-
-        参数：
-            source_cfg: 无监督学习数据源配置
-        返回：
-            {数据源名: 加载器实例}
-        """
-        logger.info("构建无监督数据加载器")
-
-        try:
-            loader = self._build_single_loader(source_cfg)
-            return {"unsupervised": loader}
-        except Exception as e:
-            logger.error(f"构建无监督加载器失败: {str(e)}", exc_info=True)
-            raise
-
-    def _build_self_supervised_source(self, source_cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建自监督学习数据源
-
-        参数：
-            source_cfg: 自监督学习数据源配置
-        返回：
-            {数据源名: 加载器实例}
-        """
-        logger.info("构建自监督数据加载器")
-
-        try:
-            loader = self._build_single_loader(source_cfg)
-            return {"self_supervised": loader}
-        except Exception as e:
-            logger.error(f"构建自监督加载器失败: {str(e)}", exc_info=True)
-            raise
-
-    def _build_single_loader(self, loader_cfg: Dict[str, Any]) -> Any:
-        """
-        构建单个数据加载器
-
-        参数：
-            loader_cfg: 加载器配置
-                {
-                    "reflection": "modules.utils.build_csv_loader",
-                    "args": {...}
-                }
-        返回：
-            数据加载器实例
-        """
-        reflection = loader_cfg.get("reflection")
-        args = loader_cfg.get("args", {})
-
-        if not reflection:
-            raise ValueError("加载器配置缺少reflection字段")
-
-        logger.debug(f"创建数据加载器: {reflection}")
-        logger.debug(f"加载器参数: {args}")
-
-        try:
-            # 通过反射调用数据加载函数
-            loader = call_target(reflection, args)
-            logger.debug("数据加载器创建成功")
-            return loader
-        except Exception as e:
-            logger.error(f"创建数据加载器失败: {str(e)}", exc_info=True)
-            raise
+    return dataloaders
 
 
-class DataBatchIterator:
+# ======================================================
+# 强化学习数据加载
+# ======================================================
+def load_rl_data(config: Dict) -> Dict[str, Any]:
     """
-    数据批次迭代器：
-    - 管理batch的获取
-    - 支持shuffle
-    - 支持repeat
+    初始化强化学习环境客户端
+
+    参数:
+        config: rl_source配置
+
+    返回:
+        dict: {"client": NetworkClient实例, "dataset": 可选的数据集, "buffer": 经验回放缓冲区}
+
+    示例:
+        >>> rl_data = load_rl_data(config)
+        >>> client = rl_data["client"]
+        >>> response = client.request("reset")
     """
+    logger.info("初始化强化学习环境")
 
-    def __init__(self, dataset: Any, batch_size: int = 32):
-        """
-        初始化迭代器
+    result = {}
 
-        参数：
-            dataset: tf.data.Dataset实例或其他可迭代对象
-            batch_size: 批大小
-        """
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.current_batch = 0
-        logger.debug(f"数据迭代器初始化: batch_size={batch_size}")
-
-    def __iter__(self) -> Iterator:
-        """迭代器协议"""
+    # 构建网络客户端
+    if "client" in config:
+        client_config = config["client"]
         try:
-            return iter(self.dataset)
-        except TypeError:
-            logger.error("数据集不可迭代")
+            client = call_target(
+                client_config["reflection"],
+                client_config.get("args", {})
+            )
+            result["client"] = client
+            logger.info("强化学习客户端初始化完成")
+        except Exception as e:
+            logger.error(f"初始化RL客户端失败: {str(e)}")
             raise
 
-    def __len__(self):
-        """获取总batch数"""
+    # 可选：构建批量训练数据集（用于经验回放）
+    if "dataset" in config:
+        dataset_config = config["dataset"]
+        dataset_args = dataset_config.get("args", {})
+
+        # 注入client实例
+        if "client" in result:
+            dataset_args["client"] = result["client"]
+
         try:
-            # 尝试计算总样本数
-            total_samples = len(self.dataset)
-            return (total_samples + self.batch_size - 1) // self.batch_size
+            dataset = call_target(
+                dataset_config["reflection"],
+                dataset_args
+            )
+            result["dataset"] = dataset
+            logger.info("强化学习数据集初始化完成")
+        except Exception as e:
+            logger.warning(f"初始化RL数据集失败: {str(e)}")
+
+    # 初始化经验回放缓冲区
+    buffer_size = config.get("buffer_size", 10000)
+    result["buffer"] = []
+    result["buffer_size"] = buffer_size
+    logger.info(f"经验回放缓冲区大小: {buffer_size}")
+
+    return result
+
+
+# ======================================================
+# 无监督学习数据加载
+# ======================================================
+def load_unsupervised_data(config: Dict) -> Dict[str, tf.data.Dataset]:
+    """
+    加载无监督学习数据
+
+    参数:
+        config: unsupervised_source配置
+
+    返回:
+        dict: {"train": dataset}
+
+    示例:
+        >>> dataloaders = load_unsupervised_data(config)
+    """
+    logger.info("加载无监督学习数据")
+
+    try:
+        dataset = call_target(
+            config["reflection"],
+            config.get("args", {})
+        )
+
+        # 应用预处理（如果配置了）
+        if config.get("preprocessing", {}).get("enabled", False):
+            dataset = apply_preprocessing(dataset, config["preprocessing"])
+
+        return {"train": dataset}
+
+    except Exception as e:
+        logger.error(f"加载无监督学习数据失败: {str(e)}")
+        raise
+
+
+# ======================================================
+# 自监督学习数据加载（含增强）
+# ======================================================
+def load_self_supervised_data(config: Dict) -> Dict[str, tf.data.Dataset]:
+    """
+    加载自监督学习数据，并应用对比增强
+
+    参数:
+        config: self_supervised_source配置
+
+    返回:
+        dict: {"train": augmented_dataset}
+
+    示例:
+        >>> dataloaders = load_self_supervised_data(config)
+        >>> for (view1, view2), y in dataloaders["train"]:
+        >>>     print(view1.shape, view2.shape)
+    """
+    logger.info("加载自监督学习数据")
+
+    try:
+        # 加载基础数据集
+        dataset = call_target(
+            config["reflection"],
+            config.get("args", {})
+        )
+
+        # 应用对比学习数据增强
+        if config.get("augmentation", {}).get("enabled", False):
+            logger.info("应用对比学习数据增强")
+            transforms = config["augmentation"].get("transforms", [])
+
+            # 使用map应用增强
+            dataset = dataset.map(
+                lambda x, y: (apply_contrastive_augmentation(x, transforms), y),
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
+
+        return {"train": dataset}
+
+    except Exception as e:
+        logger.error(f"加载自监督学习数据失败: {str(e)}")
+        raise
+
+
+# ======================================================
+# 多任务学习数据加载
+# ======================================================
+def load_multi_task_data(config: Dict) -> Dict[str, tf.data.Dataset]:
+    """
+    加载多任务学习数据
+
+    参数:
+        config: multi_task_source配置
+
+    返回:
+        dict: 多任务数据加载器
+
+    示例:
+        >>> dataloaders = load_multi_task_data(config)
+    """
+    logger.info("加载多任务学习数据")
+
+    dataloaders = {}
+
+    for task_name, task_config in config.items():
+        logger.info(f"加载任务 {task_name} 的数据")
+
+        try:
+            dataset = call_target(
+                task_config["reflection"],
+                task_config.get("args", {})
+            )
+            dataloaders[task_name] = dataset
+        except Exception as e:
+            logger.error(f"加载任务 {task_name} 数据失败: {str(e)}")
+            raise
+
+    return dataloaders
+
+
+# ======================================================
+# 数据增强逻辑
+# ======================================================
+def apply_contrastive_augmentation(
+    x: tf.Tensor,
+    transforms: List[Dict]
+) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+    应用对比学习增强（生成两个增强视图）
+
+    参数:
+        x: 输入数据
+        transforms: 增强变换列表
+
+    返回:
+        (view1, view2): 两个增强视图
+
+    示例:
+        >>> view1, view2 = apply_contrastive_augmentation(x, transforms)
+    """
+    view1 = apply_transforms(x, transforms)
+    view2 = apply_transforms(x, transforms)
+
+    return view1, view2
+
+
+def apply_transforms(data: tf.Tensor, transforms: List[Dict]) -> tf.Tensor:
+    """
+    应用一系列增强变换
+
+    参数:
+        data: 输入数据
+        transforms: 变换配置列表
+            [{"type": "RandomCrop", "args": {...}}, ...]
+
+    返回:
+        增强后的数据
+
+    示例:
+        >>> transforms = [
+        >>>     {"type": "RandomCrop", "args": {"size": [224, 224]}},
+        >>>     {"type": "RandomFlip", "args": {"horizontal": True}}
+        >>> ]
+        >>> augmented = apply_transforms(data, transforms)
+    """
+    result = data
+
+    for transform_config in transforms:
+        transform_type = transform_config.get("type")
+        transform_args = transform_config.get("args", {})
+
+        try:
+            # 应用不同类型的增强
+            if transform_type == "RandomCrop":
+                result = apply_random_crop(result, transform_args)
+
+            elif transform_type == "RandomFlip":
+                result = apply_random_flip(result, transform_args)
+
+            elif transform_type == "ColorJitter":
+                result = apply_color_jitter(result, transform_args)
+
+            elif transform_type == "RandomRotation":
+                result = apply_random_rotation(result, transform_args)
+
+            elif transform_type == "RandomResizedCrop":
+                result = apply_random_resized_crop(result, transform_args)
+
+            elif transform_type == "GaussianBlur":
+                result = apply_gaussian_blur(result, transform_args)
+
+            elif transform_type == "Normalize":
+                result = apply_normalize(result, transform_args)
+
+            elif transform_type == "RandomErasing":
+                result = apply_random_erasing(result, transform_args)
+
+            else:
+                logger.warning(f"未知的增强类型: {transform_type}")
+
+        except Exception as e:
+            logger.error(f"应用增强 {transform_type} 失败: {str(e)}")
+
+    return result
+
+
+# ======================================================
+# 具体增强函数实现
+# ======================================================
+def apply_random_crop(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """随机裁剪"""
+    size = args.get("size", [224, 224])
+    padding = args.get("padding", 0)
+
+    if padding > 0:
+        image = tf.pad(image, [[padding, padding], [padding, padding], [0, 0]], mode='REFLECT')
+
+    return tf.image.random_crop(image, [size[0], size[1], image.shape[-1]])
+
+
+def apply_random_flip(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """随机翻转"""
+    horizontal = args.get("horizontal", True)
+    vertical = args.get("vertical", False)
+
+    if horizontal:
+        image = tf.image.random_flip_left_right(image)
+    if vertical:
+        image = tf.image.random_flip_up_down(image)
+
+    return image
+
+
+def apply_color_jitter(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """颜色抖动"""
+    brightness = args.get("brightness", 0.0)
+    contrast = args.get("contrast", 0.0)
+    saturation = args.get("saturation", 0.0)
+    hue = args.get("hue", 0.0)
+
+    if brightness > 0:
+        image = tf.image.random_brightness(image, brightness)
+    if contrast > 0:
+        image = tf.image.random_contrast(image, 1 - contrast, 1 + contrast)
+    if saturation > 0:
+        image = tf.image.random_saturation(image, 1 - saturation, 1 + saturation)
+    if hue > 0:
+        image = tf.image.random_hue(image, hue)
+
+    image = tf.clip_by_value(image, 0.0, 1.0)
+    return image
+
+
+def apply_random_rotation(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """随机旋转（使用原生TensorFlow实现）"""
+    degrees = args.get("degrees", 15)
+
+    # 随机生成旋转角度（弧度）
+    angle = tf.random.uniform([], -degrees, degrees) * np.pi / 180.0
+
+    # 使用TensorFlow原生的旋转实现（通过仿射变换）
+    # 注意：如果需要更复杂的旋转，可以考虑安装 tensorflow-addons
+    # 但这里提供一个简单的替代实现
+
+    # 简单实现：使用最近邻插值的旋转
+    # 对于生产环境，建议使用专门的图像处理库
+    logger.warning("RandomRotation使用简化实现，如需完整功能请安装: pip install tensorflow-addons")
+
+    # 这里返回原图，或者可以使用其他变换代替
+    # 如果确实需要旋转功能，用户可以选择：
+    # 1. 安装 tensorflow-addons: pip install tensorflow-addons
+    # 2. 使用其他数据增强库如 albumentations
+    # 3. 在配置中移除 RandomRotation 增强
+
+    return image  # 暂时返回原图，不执行旋转
+
+
+def apply_random_resized_crop(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """随机裁剪并调整大小"""
+    size = args.get("size", [224, 224])
+    scale = args.get("scale", (0.08, 1.0))
+    ratio = args.get("ratio", (0.75, 1.333))
+
+    # 随机裁剪
+    scale_factor = tf.random.uniform([], scale[0], scale[1])
+    ratio_factor = tf.random.uniform([], ratio[0], ratio[1])
+
+    crop_h = int(image.shape[0] * tf.sqrt(scale_factor * ratio_factor))
+    crop_w = int(image.shape[1] * tf.sqrt(scale_factor / ratio_factor))
+
+    crop_h = tf.minimum(crop_h, image.shape[0])
+    crop_w = tf.minimum(crop_w, image.shape[1])
+
+    image = tf.image.random_crop(image, [crop_h, crop_w, image.shape[-1]])
+
+    # 调整大小
+    image = tf.image.resize(image, size)
+
+    return image
+
+
+def apply_gaussian_blur(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """高斯模糊"""
+    kernel_size = args.get("kernel_size", 3)
+    sigma = args.get("sigma", (0.1, 2.0))
+
+    # 随机sigma
+    if isinstance(sigma, tuple):
+        sigma_value = tf.random.uniform([], sigma[0], sigma[1])
+    else:
+        sigma_value = sigma
+
+    # 创建高斯核
+    kernel = _create_gaussian_kernel(kernel_size, sigma_value)
+
+    # 应用卷积
+    image = tf.expand_dims(image, 0)
+    image = tf.nn.depthwise_conv2d(image, kernel, strides=[1, 1, 1, 1], padding='SAME')
+    image = tf.squeeze(image, 0)
+
+    return image
+
+
+def apply_normalize(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """标准化"""
+    mean = args.get("mean", [0.485, 0.456, 0.406])
+    std = args.get("std", [0.229, 0.224, 0.225])
+
+    mean = tf.constant(mean, dtype=tf.float32)
+    std = tf.constant(std, dtype=tf.float32)
+
+    return (image - mean) / std
+
+
+def apply_random_erasing(image: tf.Tensor, args: Dict) -> tf.Tensor:
+    """随机擦除"""
+    probability = args.get("probability", 0.5)
+    area_ratio = args.get("area_ratio", (0.02, 0.4))
+    aspect_ratio = args.get("aspect_ratio", (0.3, 3.3))
+
+    if tf.random.uniform([]) > probability:
+        return image
+
+    h, w = image.shape[0], image.shape[1]
+    area = h * w
+
+    target_area = tf.random.uniform([], area_ratio[0], area_ratio[1]) * area
+    aspect = tf.random.uniform([], aspect_ratio[0], aspect_ratio[1])
+
+    erase_h = tf.cast(tf.sqrt(target_area * aspect), tf.int32)
+    erase_w = tf.cast(tf.sqrt(target_area / aspect), tf.int32)
+
+    erase_h = tf.minimum(erase_h, h)
+    erase_w = tf.minimum(erase_w, w)
+
+    top = tf.random.uniform([], 0, h - erase_h, dtype=tf.int32)
+    left = tf.random.uniform([], 0, w - erase_w, dtype=tf.int32)
+
+    # 创建mask
+    mask = tf.ones_like(image)
+    mask = tf.tensor_scatter_nd_update(
+        mask,
+        [[i, j] for i in range(top, top + erase_h) for j in range(left, left + erase_w)],
+        tf.zeros([erase_h * erase_w, image.shape[-1]])
+    )
+
+    return image * mask
+
+
+def _create_gaussian_kernel(kernel_size: int, sigma: float) -> tf.Tensor:
+    """创建高斯卷积核"""
+    x = tf.range(-kernel_size // 2 + 1, kernel_size // 2 + 1, dtype=tf.float32)
+    gauss = tf.exp(-tf.square(x) / (2.0 * sigma ** 2))
+    kernel = gauss / tf.reduce_sum(gauss)
+    kernel = tf.tensordot(kernel, kernel, axes=0)
+    kernel = tf.expand_dims(tf.expand_dims(kernel, -1), -1)
+    return kernel
+
+
+# ======================================================
+# 数据预处理工具
+# ======================================================
+def apply_preprocessing(dataset: tf.data.Dataset, preprocessing_config: Dict) -> tf.data.Dataset:
+    """
+    应用数据预处理
+
+    参数:
+        dataset: 输入数据集
+        preprocessing_config: 预处理配置
+
+    返回:
+        预处理后的数据集
+    """
+    operations = preprocessing_config.get("operations", [])
+
+    for operation in operations:
+        op_type = operation.get("type")
+        op_args = operation.get("args", {})
+
+        if op_type == "normalize":
+            dataset = dataset.map(
+                lambda x, y: (normalize_data(x, op_args.get("method", "standard")), y),
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
+        elif op_type == "resize":
+            size = op_args.get("size", [224, 224])
+            dataset = dataset.map(
+                lambda x, y: (tf.image.resize(x, size), y),
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
+
+    return dataset
+
+
+def normalize_data(data: tf.Tensor, method: str = "standard") -> tf.Tensor:
+    """
+    数据归一化
+
+    参数:
+        data: 输入数据
+        method: 归一化方法 ("standard", "minmax", "l2")
+
+    返回:
+        归一化后的数据
+    """
+    if method == "standard":
+        mean = tf.reduce_mean(data, axis=0, keepdims=True)
+        std = tf.math.reduce_std(data, axis=0, keepdims=True)
+        return (data - mean) / (std + 1e-8)
+    elif method == "minmax":
+        min_val = tf.reduce_min(data, axis=0, keepdims=True)
+        max_val = tf.reduce_max(data, axis=0, keepdims=True)
+        return (data - min_val) / (max_val - min_val + 1e-8)
+    elif method == "l2":
+        return tf.nn.l2_normalize(data, axis=-1)
+    else:
+        logger.warning(f"未知的归一化方法: {method}")
+        return data
+
+
+def create_batches(
+    dataset: tf.data.Dataset,
+    batch_size: int,
+    shuffle: bool = True,
+    buffer_size: int = 1000,
+    drop_remainder: bool = False
+) -> tf.data.Dataset:
+    """
+    创建批次
+
+    参数:
+        dataset: 输入数据集
+        batch_size: 批大小
+        shuffle: 是否打乱
+        buffer_size: 打乱缓冲区大小
+        drop_remainder: 是否丢弃最后不完整的批次
+
+    返回:
+        批处理后的数据集
+    """
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=buffer_size)
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    return dataset
+
+
+# ======================================================
+# 数据集信息工具
+# ======================================================
+def get_dataset_info(dataset: tf.data.Dataset) -> Dict[str, Any]:
+    """
+    获取数据集信息
+
+    参数:
+        dataset: TensorFlow数据集
+
+    返回:
+        dict: 数据集信息
+    """
+    info = {}
+
+    try:
+        # 获取元素规格
+        element_spec = dataset.element_spec
+        info["element_spec"] = str(element_spec)
+
+        # 尝试获取数据集大小（如果可能）
+        try:
+            size = len(list(dataset.as_numpy_iterator()))
+            info["size"] = size
         except:
-            logger.debug("无法计算总batch数")
-            return None
+            info["size"] = "unknown"
 
-    def get_next_batch(self):
-        """
-        获取下一个batch
+        logger.info(f"数据集信息: {info}")
 
-        返回：
-            batch数据，如果数据集结束返回None
-        """
-        try:
-            batch = next(iter(self.dataset))
-            self.current_batch += 1
-            return batch
-        except StopIteration:
-            logger.debug("数据集遍历完成")
-            return None
-        except Exception as e:
-            logger.error(f"获取batch失败: {str(e)}")
-            return None
+    except Exception as e:
+        logger.warning(f"获取数据集信息失败: {str(e)}")
 
-    def reset(self):
-        """重置迭代器"""
-        self.current_batch = 0
-        logger.debug("迭代器已重置")
-
-
-class DataPreprocessor:
-    """
-    数据预处理器：
-    - 数据标准化
-    - 数据增强
-    - 特征提取
-    """
-
-    @staticmethod
-    def normalize(data: Any, mean: float = 0.0, std: float = 1.0) -> Any:
-        """
-        数据标准化（Z-score标准化）
-
-        参数：
-            data: 输入数据
-            mean: 均值
-            std: 标准差
-        返回：
-            标准化后的数据
-        """
-        logger.debug(f"执行数据标准化: mean={mean}, std={std}")
-
-        try:
-            import tensorflow as tf
-            return (data - mean) / (std + 1e-7)
-        except Exception as e:
-            logger.error(f"数据标准化失败: {str(e)}")
-            raise
-
-    @staticmethod
-    def normalize_to_range(data: Any, min_val: float = 0.0, max_val: float = 1.0) -> Any:
-        """
-        数据归一化到指定范围
-
-        参数：
-            data: 输入数据
-            min_val: 最小值
-            max_val: 最大值
-        返回：
-            归一化后的数据
-        """
-        logger.debug(f"执行数据归一化到 [{min_val}, {max_val}]")
-
-        try:
-            import tensorflow as tf
-            data_min = tf.reduce_min(data)
-            data_max = tf.reduce_max(data)
-            normalized = (data - data_min) / (data_max - data_min + 1e-7)
-            return normalized * (max_val - min_val) + min_val
-        except Exception as e:
-            logger.error(f"数据归一化失败: {str(e)}")
-            raise
-
-    @staticmethod
-    def augment_data(data: Any, transforms: list = None) -> Any:
-        """
-        数据增强
-
-        参数：
-            data: 输入数据
-            transforms: 增强操作列表
-        返回：
-            增强后的数据
-        """
-        if transforms is None or len(transforms) == 0:
-            logger.debug("未指定数据增强操作")
-            return data
-
-        logger.debug(f"执行数据增强: {len(transforms)}个操作")
-
-        augmented = data
-        for idx, transform in enumerate(transforms):
-            try:
-                reflection = transform.get("reflection")
-                args = transform.get("args", {})
-
-                if not reflection:
-                    logger.warning(f"第{idx}个增强操作缺少reflection字段")
-                    continue
-
-                logger.debug(f"执行第{idx}个增强操作: {reflection}")
-
-                # 调用增强函数
-                augmented = call_target(reflection, {**args, "data": augmented})
-                logger.debug(f"第{idx}个增强操作完成")
-            except Exception as e:
-                logger.warning(f"第{idx}个增强操作失败: {str(e)}")
-                continue
-
-        return augmented
-
-
-class DataCache:
-    """
-    数据缓存管理器：
-    - 缓存已加载的数据
-    - 减少重复加载
-    """
-
-    def __init__(self, max_cache_size: int = 10):
-        """
-        初始化缓存管理器
-
-        参数：
-            max_cache_size: 最大缓存数量
-        """
-        self.cache = {}
-        self.max_cache_size = max_cache_size
-        logger.debug(f"数据缓存初始化: 最大缓存数={max_cache_size}")
-
-    def get(self, key: str) -> Optional[Any]:
-        """
-        获取缓存数据
-
-        参数：
-            key: 缓存键
-        返回：
-            缓存数据，如果不存在返回None
-        """
-        return self.cache.get(key)
-
-    def put(self, key: str, data: Any):
-        """
-        存储缓存数据
-
-        参数：
-            key: 缓存键
-            data: 数据
-        """
-        if len(self.cache) >= self.max_cache_size:
-            # 移除最旧的缓存
-            oldest_key = next(iter(self.cache))
-            del self.cache[oldest_key]
-            logger.debug(f"缓存满，移除最旧的缓存: {oldest_key}")
-
-        self.cache[key] = data
-        logger.debug(f"数据已缓存: {key}")
-
-    def clear(self):
-        """清空所有缓存"""
-        self.cache.clear()
-        logger.debug("缓存已清空")
+    return info

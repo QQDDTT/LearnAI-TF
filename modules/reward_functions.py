@@ -1,304 +1,295 @@
 # -*- coding: utf-8 -*-
 """
-reward_functions.py - 强化学习奖励函数
-功能：
-  - 根据配置文件计算奖励
-  - 支持表达式、脚本、聚合三种方式
-  - 灵活定义奖励规则
+modules/reward_functions.py
+强化学习奖励函数模块：
+- 游戏相关奖励函数
+- 任务相关奖励函数
+- 奖励塑形（Reward Shaping）
 """
 
-from typing import Dict, Any, Optional
-import re
-from modules.utils import LoggerManager, call_target
+from typing import Dict, Any
+from common.common import LoggerManager
 
 logger = LoggerManager.get_logger(__file__)
 
 
-class RewardFunctionBuilder:
+# ======================================================
+# 通用奖励函数
+# ======================================================
+def compute_basic_reward(
+    response: Dict[str, Any],
+    score_weight: float = 1.0,
+    completion_bonus: float = 0.0,
+    step_penalty: float = 0.0
+) -> float:
     """
-    奖励函数构建器：
-    - 根据配置生成奖励计算函数
-    - 支持多种奖励计算方式
+    基础奖励计算
+
+    参数:
+        response: 环境响应 {"reward": float, "done": bool, "score": float, ...}
+        score_weight: 分数权重
+        completion_bonus: 完成任务奖励
+        step_penalty: 每步惩罚
+
+    返回:
+        float: 奖励值
     """
+    # 基础奖励
+    reward = response.get("reward", 0.0) * score_weight
 
-    def build_all(self, reward_config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建所有奖励函数
-        参数：
-            reward_config: 配置文件中的reward_functions部分
-        返回：
-            {奖励函数名: 奖励计算函数}
-        """
-        reward_functions = {}
+    # 完成奖励
+    if response.get("done", False):
+        reward += completion_bonus
 
-        for reward_name, reward_cfg in reward_config.items():
-            logger.info(f"构建奖励函数: {reward_name}")
-            try:
-                reward_fn = self.build_single(reward_name, reward_cfg)
-                reward_functions[reward_name] = reward_fn
-                logger.info(f"奖励函数 {reward_name} 构建成功")
-            except Exception as e:
-                logger.error(f"奖励函数 {reward_name} 构建失败: {str(e)}", exc_info=True)
-                raise
+    # 步数惩罚（鼓励快速完成）
+    if step_penalty > 0:
+        reward -= step_penalty
 
-        return reward_functions
-
-    def build_single(self, reward_name: str, reward_cfg: Dict[str, Any]):
-        """
-        构建单个奖励函数
-        参数：
-            reward_name: 奖励函数名称
-            reward_cfg: 奖励函数配置
-        返回：
-            奖励计算函数
-        """
-        reward_type = reward_cfg.get("type", "expression")
-
-        if reward_type == "expression":
-            return self._build_expression_reward(reward_name, reward_cfg)
-        elif reward_type == "script":
-            return self._build_script_reward(reward_name, reward_cfg)
-        elif reward_type == "aggregation":
-            return self._build_aggregation_reward(reward_name, reward_cfg)
-        else:
-            raise ValueError(f"未知的奖励函数类型: {reward_type}")
-
-    def _build_expression_reward(self, reward_name: str, reward_cfg: Dict[str, Any]):
-        """
-        构建表达式奖励（简单公式）
-        例如：reward * log_prob
-        """
-        formula = reward_cfg.get("formula", "reward")
-        variables = reward_cfg.get("variables", [])
-
-        def compute_reward(context: Dict[str, Any]) -> float:
-            """
-            根据上下文计算奖励
-            参数：
-                context: 执行上下文
-            返回：
-                奖励值
-            """
-            # 提取变量值
-            var_values = {}
-            for var_cfg in variables:
-                var_name = var_cfg.get("name")
-                var_source = var_cfg.get("source")
-
-                # 从context中提取变量值
-                value = self._extract_value_from_context(var_source, context)
-                var_values[var_name] = value
-
-            # 计算公式
-            try:
-                reward_value = self._safe_eval(formula, var_values)
-                logger.debug(f"奖励函数 {reward_name} 计算结果: {reward_value}")
-                return float(reward_value)
-            except Exception as e:
-                logger.error(f"计算公式失败: {formula}, 错误: {str(e)}")
-                return 0.0
-
-        return compute_reward
-
-    def _build_script_reward(self, reward_name: str, reward_cfg: Dict[str, Any]):
-        """
-        构建脚本奖励（调用函数）
-        """
-        function = reward_cfg.get("function")
-        args = reward_cfg.get("args", {})
-
-        def compute_reward(context: Dict[str, Any]) -> float:
-            """根据上下文调用函数计算奖励"""
-            try:
-                reward_value = call_target(function, {**args, "context": context})
-                return float(reward_value)
-            except Exception as e:
-                logger.error(f"调用奖励函数 {function} 失败: {str(e)}")
-                return 0.0
-
-        return compute_reward
-
-    def _build_aggregation_reward(self, reward_name: str, reward_cfg: Dict[str, Any]):
-        """
-        构建聚合奖励（多阶段评分）
-        仅在特定条件触发时计算
-        """
-        trigger = reward_cfg.get("trigger", "done == true")
-        formula = reward_cfg.get("formula", "reward")
-
-        def compute_reward(context: Dict[str, Any]) -> float:
-            """根据上下文和触发条件计算奖励"""
-            # 检查触发条件
-            if not self._check_trigger(trigger, context):
-                return 0.0
-
-            # 计算奖励
-            try:
-                reward_value = self._safe_eval(formula, context)
-                logger.debug(f"聚合奖励 {reward_name} 计算结果: {reward_value}")
-                return float(reward_value)
-            except Exception as e:
-                logger.error(f"计算公式失败: {formula}, 错误: {str(e)}")
-                return 0.0
-
-        return compute_reward
-
-    def _extract_value_from_context(self, source: str, context: Dict[str, Any]) -> Any:
-        """
-        从上下文中提取值
-        支持的格式：
-        - "feedback.reward": 嵌套字典访问
-        - "${variable}": 直接变量访问
-        """
-        if source.startswith("${") and source.endswith("}"):
-            # 直接变量
-            var_name = source[2:-1]
-            return context.get(var_name)
-        else:
-            # 嵌套访问 (feedback.reward)
-            parts = source.split(".")
-            value = context
-            for part in parts:
-                if isinstance(value, dict):
-                    value = value.get(part)
-                else:
-                    return None
-            return value
-
-    def _check_trigger(self, trigger: str, context: Dict[str, Any]) -> bool:
-        """
-        检查触发条件
-        例如：done == true, reward > 10
-        """
-        try:
-            # 安全地评估条件
-            return self._safe_eval(trigger, context)
-        except:
-            return False
-
-    def _safe_eval(self, expression: str, context: Dict[str, Any]) -> Any:
-        """
-        安全地评估表达式
-        仅允许基本的算术和比较操作
-        """
-        # 限制允许的操作符和函数
-        allowed_names = {
-            'True': True, 'False': False, 'None': None,
-            '__builtins__': {},
-        }
-
-        # 添加context中的变量
-        allowed_names.update(context)
-
-        try:
-            # 使用eval，但限制命名空间
-            return eval(expression, {"__builtins__": {}}, allowed_names)
-        except Exception as e:
-            logger.error(f"表达式评估失败: {expression}, 错误: {str(e)}")
-            raise
+    return float(reward)
 
 
-class RewardCalculator:
+def compute_game_reward(
+    response: Dict[str, Any],
+    win_bonus: float = 100.0,
+    lose_penalty: float = -100.0,
+    score_delta_weight: float = 1.0
+) -> float:
     """
-    奖励计算器：
-    - 管理奖励函数
-    - 计算奖励值
-    - 支持奖励缓存和累积
+    游戏相关奖励（如Atari游戏）
+
+    参数:
+        response: 环境响应
+        win_bonus: 胜利奖励
+        lose_penalty: 失败惩罚
+        score_delta_weight: 分数变化权重
+
+    返回:
+        float: 奖励值
     """
+    reward = 0.0
 
-    def __init__(self, reward_functions: Dict[str, Any] = None):
-        """
-        初始化计算器
-        参数：
-            reward_functions: 奖励函数字典
-        """
-        self.reward_functions = reward_functions or {}
-        self.reward_history = []
+    # 分数变化
+    score_delta = response.get("score_delta", 0.0)
+    reward += score_delta * score_delta_weight
 
-    def compute(self,
-                reward_name: str,
-                context: Dict[str, Any]) -> float:
-        """
-        计算单个奖励
-        参数：
-            reward_name: 奖励函数名称
-            context: 执行上下文
-        返回：
-            奖励值
-        """
-        if reward_name not in self.reward_functions:
-            logger.warning(f"未找到奖励函数: {reward_name}")
-            return 0.0
+    # 胜负判定
+    if response.get("done", False):
+        if response.get("win", False):
+            reward += win_bonus
+        elif response.get("lose", False):
+            reward += lose_penalty
 
-        reward_fn = self.reward_functions[reward_name]
-        reward = reward_fn(context)
-
-        # 记录到历史
-        self.reward_history.append({
-            "name": reward_name,
-            "value": reward,
-            "context": context
-        })
-
-        return reward
-
-    def get_cumulative_reward(self) -> float:
-        """获取累积奖励"""
-        return sum(r["value"] for r in self.reward_history)
-
-    def get_average_reward(self) -> float:
-        """获取平均奖励"""
-        if len(self.reward_history) == 0:
-            return 0.0
-        return self.get_cumulative_reward() / len(self.reward_history)
-
-    def reset_history(self):
-        """重置历史"""
-        self.reward_history = []
+    return float(reward)
 
 
-class RewardNormalizer:
+# ======================================================
+# 任务导向奖励函数
+# ======================================================
+def compute_navigation_reward(
+    response: Dict[str, Any],
+    goal_reached_bonus: float = 100.0,
+    distance_reward_weight: float = 1.0,
+    collision_penalty: float = -10.0
+) -> float:
     """
-    奖励标准化器：
-    - 归一化奖励到[-1, 1]范围
-    - 奖励缩放
-    - 运行统计
+    导航任务奖励（如机器人导航）
+
+    参数:
+        response: 环境响应
+        goal_reached_bonus: 到达目标奖励
+        distance_reward_weight: 距离变化权重
+        collision_penalty: 碰撞惩罚
+
+    返回:
+        float: 奖励值
     """
+    reward = 0.0
 
-    def __init__(self):
-        self.reward_sum = 0.0
-        self.reward_sq_sum = 0.0
-        self.reward_count = 0
+    # 到达目标
+    if response.get("goal_reached", False):
+        reward += goal_reached_bonus
 
-    def update(self, reward: float):
-        """更新统计"""
-        self.reward_sum += reward
-        self.reward_sq_sum += reward ** 2
-        self.reward_count += 1
+    # 距离变化（离目标更近给奖励）
+    distance_delta = response.get("distance_delta", 0.0)
+    reward += distance_delta * distance_reward_weight
 
-    def normalize(self, reward: float) -> float:
-        """标准化奖励"""
-        if self.reward_count == 0:
-            return 0.0
+    # 碰撞惩罚
+    if response.get("collision", False):
+        reward += collision_penalty
 
-        mean = self.reward_sum / self.reward_count
-        variance = (self.reward_sq_sum / self.reward_count) - (mean ** 2)
-        std = (variance ** 0.5) + 1e-8
+    return float(reward)
 
-        return (reward - mean) / std
 
-    def get_statistics(self) -> Dict[str, float]:
-        """获取统计信息"""
-        if self.reward_count == 0:
-            return {"mean": 0.0, "std": 0.0, "count": 0}
+def compute_manipulation_reward(
+    response: Dict[str, Any],
+    task_success_bonus: float = 100.0,
+    progress_weight: float = 10.0,
+    action_penalty: float = 0.01
+) -> float:
+    """
+    操作任务奖励（如机械臂抓取）
 
-        mean = self.reward_sum / self.reward_count
-        variance = (self.reward_sq_sum / self.reward_count) - (mean ** 2)
-        std = (variance ** 0.5) + 1e-8
+    参数:
+        response: 环境响应
+        task_success_bonus: 任务成功奖励
+        progress_weight: 进度奖励权重
+        action_penalty: 动作惩罚（鼓励少动作）
 
-        return {
-            "mean": mean,
-            "std": std,
-            "count": self.reward_count,
-            "sum": self.reward_sum
-        }
+    返回:
+        float: 奖励值
+    """
+    reward = 0.0
+
+    # 任务成功
+    if response.get("task_success", False):
+        reward += task_success_bonus
+
+    # 任务进度
+    progress = response.get("progress", 0.0)
+    reward += progress * progress_weight
+
+    # 动作惩罚
+    reward -= action_penalty
+
+    return float(reward)
+
+
+# ======================================================
+# 奖励塑形（Reward Shaping）
+# ======================================================
+def apply_potential_based_shaping(
+    current_state: Dict,
+    next_state: Dict,
+    gamma: float = 0.99,
+    potential_fn: callable = None
+) -> float:
+    """
+    基于势能的奖励塑形
+    保证策略不变性的奖励塑形方法
+
+    公式: F(s, s') = γ * Φ(s') - Φ(s)
+
+    参数:
+        current_state: 当前状态
+        next_state: 下一状态
+        gamma: 折扣因子
+        potential_fn: 势能函数
+
+    返回:
+        float: 塑形奖励
+    """
+    if potential_fn is None:
+        # 默认势能函数：离目标的距离
+        def default_potential(state):
+            return -state.get("distance_to_goal", 0.0)
+        potential_fn = default_potential
+
+    current_potential = potential_fn(current_state)
+    next_potential = potential_fn(next_state)
+
+    shaping_reward = gamma * next_potential - current_potential
+
+    return float(shaping_reward)
+
+
+def apply_curiosity_bonus(
+    state: Dict,
+    action: int,
+    novelty_score: float
+) -> float:
+    """
+    好奇心驱动的内在奖励
+    鼓励探索新状态
+
+    参数:
+        state: 状态
+        action: 动作
+        novelty_score: 新颖度分数（由预测模型计算）
+
+    返回:
+        float: 好奇心奖励
+    """
+    # 新颖度越高，奖励越大
+    curiosity_reward = novelty_score
+
+    return float(curiosity_reward)
+
+
+# ======================================================
+# 多目标奖励函数
+# ======================================================
+def compute_multi_objective_reward(
+    response: Dict[str, Any],
+    objectives: Dict[str, float]
+) -> Dict[str, float]:
+    """
+    多目标奖励计算
+
+    参数:
+        response: 环境响应
+        objectives: 目标权重 {"objective1": weight1, "objective2": weight2, ...}
+
+    返回:
+        dict: 各目标的奖励和总奖励
+    """
+    rewards = {}
+    total_reward = 0.0
+
+    for objective_name, weight in objectives.items():
+        objective_reward = response.get(objective_name, 0.0)
+        weighted_reward = objective_reward * weight
+
+        rewards[objective_name] = objective_reward
+        total_reward += weighted_reward
+
+    rewards["total"] = total_reward
+
+    return rewards
+
+
+# ======================================================
+# 稀疏奖励处理
+# ======================================================
+def apply_reward_normalization(
+    reward: float,
+    running_mean: float,
+    running_std: float,
+    alpha: float = 0.01
+) -> tuple:
+    """
+    奖励标准化
+    处理稀疏奖励问题
+
+    参数:
+        reward: 原始奖励
+        running_mean: 运行均值
+        running_std: 运行标准差
+        alpha: 更新率
+
+    返回:
+        (normalized_reward, new_mean, new_std)
+    """
+    # 更新统计量
+    new_mean = (1 - alpha) * running_mean + alpha * reward
+    new_std = (1 - alpha) * running_std + alpha * abs(reward - running_mean)
+
+    # 标准化
+    normalized_reward = (reward - new_mean) / (new_std + 1e-8)
+
+    return float(normalized_reward), float(new_mean), float(new_std)
+
+
+def apply_reward_clipping(reward: float, min_val: float = -1.0, max_val: float = 1.0) -> float:
+    """
+    奖励裁剪
+    限制奖励的范围
+
+    参数:
+        reward: 原始奖励
+        min_val: 最小值
+        max_val: 最大值
+
+    返回:
+        float: 裁剪后的奖励
+    """
+    return float(max(min_val, min(max_val, reward)))

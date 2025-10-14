@@ -1,477 +1,311 @@
 # -*- coding: utf-8 -*-
 """
-models.py - 模型定义和生成
-功能：
-  - 通过反射调用从配置文件生成模型
-  - 支持任意深度的模型（深度学习或浅层）
-  - 通过配置文件中的reflection字段动态构建
+modules/models.py
+模型构建模块：
+- 构建神经网络模型
+- 模型加载和保存
+- 模型管理
 """
 
-from typing import Dict, Any, List, Optional
-import os
-from modules.utils import LoggerManager, call_target
+import tensorflow as tf
+from typing import Dict, Any, List
+from common.common import LoggerManager, call_target
 
 logger = LoggerManager.get_logger(__file__)
 
 
-class ModelBuilder:
+# ======================================================
+# 主构建函数
+# ======================================================
+def build_all_models(config: Dict) -> Dict[str, tf.keras.Model]:
     """
-    模型构建器：
-    - 根据配置文件动态生成模型
-    - 使用反射调用TensorFlow/PyTorch的API
-    - 支持任意模型结构
+    构建所有模型
+
+    参数:
+        config: models配置
+
+    返回:
+        dict: 模型字典 {model_name: model}
     """
+    model_dict = {}
 
-    def build_all(self, models_config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        构建所有配置中的模型
+    for model_name, model_config in config.items():
+        logger.info(f"构建模型: {model_name}")
 
-        参数：
-            models_config: 配置文件中的models部分
-                {
-                    "generator": {...},
-                    "discriminator": {...},
-                    "actor": {...},
-                    "critic": {...}
-                }
-        返回：
-            {模型名: 模型实例}
-        """
-        models = {}
+        model_type = model_config["type"]
 
-        if not models_config:
-            logger.warning("模型配置为空")
-            return models
-
-        for model_name, model_cfg in models_config.items():
-            logger.info(f"构建模型: {model_name}")
-            try:
-                model = self.build_single(model_name, model_cfg)
-                models[model_name] = model
-                logger.info(f"模型 {model_name} 构建成功")
-            except Exception as e:
-                logger.error(f"模型 {model_name} 构建失败: {str(e)}", exc_info=True)
-                raise
-
-        return models
-
-    def build_single(self, model_name: str, model_cfg: Dict[str, Any]) -> Any:
-        """
-        构建单个模型
-
-        参数：
-            model_name: 模型名称
-            model_cfg: 模型配置
-                {
-                    "type": "Functional",
-                    "reflection": "tensorflow.keras.Sequential",
-                    "layers": [...]
-                }
-        返回：
-            模型实例
-        """
-        if not model_cfg:
-            raise ValueError(f"模型 {model_name} 配置为空")
-
-        model_type = model_cfg.get("type", "Functional")
-        reflection = model_cfg.get("reflection")
-
-        if not reflection:
-            raise ValueError(f"模型 {model_name} 缺少reflection字段")
-
-        logger.debug(f"模型类型: {model_type}, 反射路径: {reflection}")
-
-        if model_type == "Functional":
-            return self._build_functional(model_name, model_cfg)
-        elif model_type == "Sequential":
-            return self._build_sequential(model_name, model_cfg)
-        elif model_type == "Custom":
-            return self._build_custom(model_name, model_cfg)
+        if model_type == "Sequential":
+            model = build_sequential_model(model_config)
+        elif model_type == "Functional":
+            model = build_functional_model(model_config)
         else:
-            raise ValueError(f"不支持的模型类型: {model_type}")
+            raise ValueError(f"未知的模型类型: {model_type}")
 
-    def _build_functional(self, model_name: str, model_cfg: Dict[str, Any]) -> Any:
-        """
-        构建函数式模型（Sequential或Functional API）
+        model_dict[model_name] = model
+        logger.info(f"  模型构建完成，参数量: {model.count_params():,}")
 
-        流程：
-        1. 调用model_cfg.reflection中的类构造函数
-        2. 逐层添加layers中定义的层
+    return model_dict
 
-        参数：
-            model_name: 模型名称
-            model_cfg: 模型配置
-        返回：
-            模型实例
-        """
-        reflection = model_cfg.get("reflection")
-        layers_cfg = model_cfg.get("layers", [])
 
-        logger.debug(f"构建函数式模型: {model_name}")
+# ======================================================
+# Sequential 模型构建
+# ======================================================
+def build_sequential_model(config: Dict) -> tf.keras.Sequential:
+    """
+    构建Sequential顺序模型
 
-        # 步骤1：创建模型容器（通常是Sequential）
-        logger.debug(f"创建模型容器: {reflection}")
+    参数:
+        config: 模型配置
+            - reflection: 模型类路径
+            - layers: 层配置列表
+
+    返回:
+        tf.keras.Sequential模型
+    """
+    layers = []
+
+    for layer_config in config.get("layers", []):
+        layer = call_target(
+            layer_config["reflection"],
+            layer_config.get("args", {})
+        )
+        layers.append(layer)
+
+    # 通过反射创建Sequential模型
+    model_class = call_target(config["reflection"], {})
+
+    # 如果返回的是类，则实例化并添加层
+    if isinstance(model_class, type):
+        model = model_class(layers)
+    else:
+        # 如果已经是实例，直接返回
+        model = model_class
+        for layer in layers:
+            model.add(layer)
+
+    return model
+
+
+# ======================================================
+# Functional 模型构建
+# ======================================================
+def build_functional_model(config: Dict) -> tf.keras.Model:
+    """
+    构建Functional API模型
+
+    参数:
+        config: 模型配置 (必须包含 layers 列表)
+
+    返回:
+        tf.keras.Model
+    """
+    layers_config = config.get("layers", [])
+    if not layers_config:
+        raise ValueError("Functional模型配置中 'layers' 列表不能为空。")
+
+    # 用于存储已创建的 Keras 张量 (Tensor)，键是层名或自定义名称
+    tensor_map = {}
+
+    # 用于存储 Input 层对象，以便最后构建 tf.keras.Model
+    input_layers = []
+
+    # 跟踪上一个输出张量，用于默认的顺序连接
+    last_output_tensor = None
+
+    logger.info("  开始解析函数式模型层连接...")
+
+    for i, layer_cfg in enumerate(layers_config):
+        # 1. 获取反射路径和参数
+        reflection_path = layer_cfg["reflection"]
+        args = layer_cfg.get("args", {})
+        layer_name = layer_cfg.get("name", f"layer_{i}")
+
+        # 2. 创建 Keras Layer/Tensor 对象
         try:
-            model = call_target(reflection)
-        except Exception as e:
-            logger.error(f"创建模型容器失败: {str(e)}")
-            raise
+            # 2.1. 处理 Input 层 (特殊的创建方式)
+            if "Input" in reflection_path:
+                # Input 层直接通过 call_target 创建一个 Tensor 对象
+                current_tensor = call_target(reflection_path, args)
+                input_layers.append(current_tensor)
 
-        # 步骤2：添加所有层
-        if not layers_cfg:
-            logger.warning(f"模型 {model_name} 没有层配置")
-            return model
+                # Input 层没有输入，它是图的起点
+                current_tensor_input = None
 
-        for idx, layer_cfg in enumerate(layers_cfg):
-            layer_reflection = layer_cfg.get("reflection")
-            layer_args = layer_cfg.get("args", {})
+            # 2.2. 处理普通层
+            else:
+                # 使用 call_target 反射创建 Layer 实例 (如 Dense, Conv2D)
+                layer_instance = call_target(reflection_path, args)
 
-            if not layer_reflection:
-                logger.warning(f"第{idx}层缺少reflection字段，跳过")
-                continue
+                # 确定当前层的输入张量
+                input_spec = layer_cfg.get("input_tensor", None)
 
-            logger.debug(f"添加第{idx}层: {layer_reflection}, 参数: {layer_args}")
-
-            try:
-                # 通过反射调用构造函数，创建层实例
-                layer = call_target(layer_reflection, layer_args)
-
-                # 将层添加到模型
-                if hasattr(model, 'add'):
-                    model.add(layer)
+                if input_spec:
+                    # 显式连接：从 tensor_map 中查找指定的输入张量
+                    current_tensor_input = tensor_map.get(input_spec)
+                    if current_tensor_input is None:
+                        raise ValueError(f"层 '{layer_name}' 指定的输入张量 '{input_spec}' 未找到或未命名。")
                 else:
-                    logger.warning(f"模型没有add方法，无法添加第{idx}层")
-                    raise ValueError(f"模型类型不支持add方法")
+                    # 默认连接：使用上一个层的输出
+                    current_tensor_input = last_output_tensor
 
-                logger.debug(f"第{idx}层添加成功")
-            except Exception as e:
-                logger.error(f"添加第{idx}层失败: {str(e)}", exc_info=True)
-                raise
+                if current_tensor_input is None:
+                    raise ValueError(f"层 '{layer_name}' 缺少输入张量。请确保第一个非Input层有Input连接。")
 
-        logger.debug(f"模型 {model_name} 构建完成，共{len(layers_cfg)}层")
-        return model
+                # 调用 Layer 实例，实现张量连接：output = layer(input)
+                current_tensor = layer_instance(current_tensor_input)
 
-    def _build_sequential(self, model_name: str, model_cfg: Dict[str, Any]) -> Any:
-        """
-        构建Sequential模型
-        这是_build_functional的别名，保留用于向后兼容
+            # 3. 更新张量映射和上一个输出
+            tensor_map[layer_name] = current_tensor
+            last_output_tensor = current_tensor
+            logger.debug(f"    - Layer '{layer_name}' (Output Shape: {current_tensor.shape})")
 
-        参数：
-            model_name: 模型名称
-            model_cfg: 模型配置
-        返回：
-            模型实例
-        """
-        return self._build_functional(model_name, model_cfg)
-
-    def _build_custom(self, model_name: str, model_cfg: Dict[str, Any]) -> Any:
-        """
-        构建自定义模型
-
-        参数：
-            model_name: 模型名称
-            model_cfg: 模型配置
-        返回：
-            模型实例
-        """
-        reflection = model_cfg.get("reflection")
-        args = model_cfg.get("args", {})
-
-        logger.debug(f"构建自定义模型: {model_name}")
-
-        try:
-            model = call_target(reflection, args)
-            logger.debug(f"自定义模型 {model_name} 构建完成")
-            return model
         except Exception as e:
-            logger.error(f"构建自定义模型失败: {str(e)}", exc_info=True)
+            logger.error(f"  构建层 '{layer_name}' 失败: {str(e)}", exc_info=True)
             raise
 
+    # 4. 构建最终的 tf.keras.Model
+    if not input_layers:
+        raise ValueError("Functional模型必须至少有一个 Input 层。")
+    if last_output_tensor is None:
+        raise ValueError("Functional模型构建完成，但没有找到最终的输出张量。")
 
-class ModelManager:
+    model = tf.keras.Model(
+        inputs=input_layers,
+        outputs=last_output_tensor,
+        name=config.get("name")
+    )
+
+    logger.info(f"  函数式模型构建成功，Input 数量: {len(input_layers)}")
+    return model
+
+
+# ======================================================
+# 预训练模型加载
+# ======================================================
+def load_pretrained_model(
+    model_name: str,
+    weights: str = "imagenet",
+    include_top: bool = False,
+    input_shape: tuple = None
+) -> tf.keras.Model:
     """
-    模型管理器：
-    - 保存和加载模型
-    - 模型版本管理
-    - 获取模型权重
-    - 模型验证
+    加载预训练模型
+
+    参数:
+        model_name: 模型名称 (VGG16/ResNet50/MobileNetV2等)
+        weights: 权重 (imagenet/None)
+        include_top: 是否包含顶层分类器
+        input_shape: 输入形状
+
+    返回:
+        预训练模型
     """
+    logger.info(f"加载预训练模型: {model_name}")
 
-    def __init__(self, model_dir: str = "outputs/models"):
-        """
-        初始化管理器
+    if model_name == "VGG16":
+        model = tf.keras.applications.VGG16(
+            weights=weights,
+            include_top=include_top,
+            input_shape=input_shape
+        )
+    elif model_name == "ResNet50":
+        model = tf.keras.applications.ResNet50(
+            weights=weights,
+            include_top=include_top,
+            input_shape=input_shape
+        )
+    elif model_name == "MobileNetV2":
+        model = tf.keras.applications.MobileNetV2(
+            weights=weights,
+            include_top=include_top,
+            input_shape=input_shape
+        )
+    else:
+        raise ValueError(f"未知的预训练模型: {model_name}")
 
-        参数：
-            model_dir: 模型保存目录
-        """
-        self.model_dir = model_dir
-        os.makedirs(model_dir, exist_ok=True)
-        logger.info(f"模型管理器初始化: {model_dir}")
-
-    def save_model(self, model: Any, model_name: str, version: int = 0, format: str = "keras"):
-        """
-        保存模型
-
-        参数：
-            model: 模型实例
-            model_name: 模型名称
-            version: 版本号
-            format: 保存格式 (keras/h5/savedmodel/checkpoint)
-        """
-        if format == "keras":
-            self._save_keras_model(model, model_name, version)
-        elif format == "h5":
-            self._save_h5_model(model, model_name, version)
-        elif format == "savedmodel":
-            self._save_savedmodel(model, model_name, version)
-        elif format == "checkpoint":
-            self._save_checkpoint(model, model_name, version)
-        else:
-            raise ValueError(f"不支持的保存格式: {format}")
-
-    def _save_keras_model(self, model: Any, model_name: str, version: int):
-        """保存为Keras格式"""
-        save_path = os.path.join(self.model_dir, f"{model_name}_v{version}")
-
-        logger.info(f"保存模型为Keras格式: {save_path}")
-
-        try:
-            call_target("tensorflow.keras.models.save_model", {
-                "model": model,
-                "filepath": save_path,
-                "save_format": "keras"
-            })
-            logger.info(f"模型已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存模型失败: {str(e)}", exc_info=True)
-            raise
-
-    def _save_h5_model(self, model: Any, model_name: str, version: int):
-        """保存为H5格式"""
-        save_path = os.path.join(self.model_dir, f"{model_name}_v{version}.h5")
-
-        logger.info(f"保存模型为H5格式: {save_path}")
-
-        try:
-            call_target("tensorflow.keras.models.save_model", {
-                "model": model,
-                "filepath": save_path,
-                "save_format": "h5"
-            })
-            logger.info(f"模型已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存H5模型失败: {str(e)}", exc_info=True)
-            raise
-
-    def _save_savedmodel(self, model: Any, model_name: str, version: int):
-        """保存为SavedModel格式"""
-        save_path = os.path.join(self.model_dir, f"{model_name}_v{version}")
-
-        logger.info(f"保存模型为SavedModel格式: {save_path}")
-
-        try:
-            call_target("tensorflow.keras.models.save_model", {
-                "model": model,
-                "filepath": save_path,
-                "save_format": "tf"
-            })
-            logger.info(f"模型已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存SavedModel失败: {str(e)}", exc_info=True)
-            raise
-
-    def _save_checkpoint(self, model: Any, model_name: str, version: int):
-        """保存为检查点格式"""
-        save_path = os.path.join(self.model_dir, f"{model_name}_v{version}_ckpt")
-
-        logger.info(f"保存检查点: {save_path}")
-
-        try:
-            # 保存权重
-            weights = model.get_weights()
-            import pickle
-            os.makedirs(save_path, exist_ok=True)
-            with open(os.path.join(save_path, "weights.pkl"), 'wb') as f:
-                pickle.dump(weights, f)
-            logger.info(f"检查点已保存到: {save_path}")
-        except Exception as e:
-            logger.error(f"保存检查点失败: {str(e)}", exc_info=True)
-            raise
-
-    def load_model(self, model_name: str, version: int = 0, custom_objects: Dict = None) -> Any:
-        """
-        加载模型
-
-        参数：
-            model_name: 模型名称
-            version: 版本号
-            custom_objects: 自定义对象字典
-        返回：
-            模型实例
-        """
-        load_path = os.path.join(self.model_dir, f"{model_name}_v{version}")
-
-        logger.info(f"加载模型: {load_path}")
-
-        try:
-            args = {
-                "filepath": load_path,
-                "custom_objects": custom_objects or {}
-            }
-            model = call_target("tensorflow.keras.models.load_model", args)
-            logger.info(f"模型加载成功")
-            return model
-        except Exception as e:
-            logger.error(f"加载模型失败: {str(e)}", exc_info=True)
-            raise
-
-    def get_weights(self, model: Any) -> List[Any]:
-        """
-        获取模型权重
-
-        参数：
-            model: 模型实例
-        返回：
-            权重列表
-        """
-        try:
-            weights = model.get_weights()
-            logger.debug(f"获取模型权重成功，共{len(weights)}个权重矩阵")
-            return weights
-        except Exception as e:
-            logger.error(f"获取权重失败: {str(e)}")
-            return []
-
-    def set_weights(self, model: Any, weights: List[Any]):
-        """
-        设置模型权重
-
-        参数：
-            model: 模型实例
-            weights: 权重列表
-        """
-        try:
-            model.set_weights(weights)
-            logger.debug(f"设置模型权重成功")
-        except Exception as e:
-            logger.error(f"设置权重失败: {str(e)}")
-            raise
-
-    def clone_model(self, model: Any, model_name: str, version: int = 0) -> Any:
-        """
-        克隆模型
-
-        参数：
-            model: 要克隆的模型
-            model_name: 新模型名称
-            version: 版本号
-        返回：
-            克隆的模型
-        """
-        try:
-            cloned = call_target("tensorflow.keras.models.clone_model", {
-                "model": model
-            })
-            logger.info(f"模型克隆成功: {model_name}_v{version}")
-            return cloned
-        except Exception as e:
-            logger.error(f"克隆模型失败: {str(e)}")
-            raise
-
-    def get_model_summary(self, model: Any) -> str:
-        """
-        获取模型摘要信息
-
-        参数：
-            model: 模型实例
-        返回：
-            摘要字符串
-        """
-        try:
-            from io import StringIO
-            import sys
-
-            # 捕获summary的输出
-            buffer = StringIO()
-            model.summary(print_fn=lambda x: buffer.write(x + '\n'))
-            summary = buffer.getvalue()
-
-            return summary
-        except Exception as e:
-            logger.warning(f"获取模型摘要失败: {str(e)}")
-            return ""
-
-    def print_model_info(self, model: Any):
-        """
-        打印模型信息
-
-        参数：
-            model: 模型实例
-        """
-        logger.info("=" * 60)
-        logger.info("模型信息")
-        logger.info("=" * 60)
-
-        try:
-            summary = self.get_model_summary(model)
-            logger.info(summary)
-        except Exception as e:
-            logger.warning(f"打印模型信息失败: {str(e)}")
+    logger.info(f"  预训练模型加载完成")
+    return model
 
 
-class ModelValidator:
+# ======================================================
+# 模型保存和加载
+# ======================================================
+def save_model(model: tf.keras.Model, path: str, save_format: str = "tf") -> None:
     """
-    模型验证器：
-    - 验证模型结构
-    - 检查模型权重
-    - 验证模型输入输出
+    保存模型
+
+    参数:
+        model: Keras模型
+        path: 保存路径
+        save_format: 保存格式 (tf/h5)
     """
+    logger.info(f"保存模型到: {path}")
+    model.save(path, save_format=save_format)
+    logger.info("  模型保存完成")
 
-    @staticmethod
-    def validate_model(model: Any) -> bool:
-        """
-        验证模型
 
-        参数：
-            model: 模型实例
-        返回：
-            验证是否通过
-        """
-        try:
-            # 检查模型是否有必要的方法
-            if not hasattr(model, 'predict'):
-                logger.error("模型缺少predict方法")
-                return False
+def load_model_from_file(path: str) -> tf.keras.Model:
+    """
+    从文件加载模型
 
-            if not hasattr(model, 'get_weights'):
-                logger.error("模型缺少get_weights方法")
-                return False
+    参数:
+        path: 模型文件路径
 
-            logger.info("模型验证通过")
-            return True
-        except Exception as e:
-            logger.error(f"模型验证失败: {str(e)}")
-            return False
+    返回:
+        加载的模型
+    """
+    logger.info(f"从文件加载模型: {path}")
+    model = tf.keras.models.load_model(path)
+    logger.info("  模型加载完成")
+    return model
 
-    @staticmethod
-    def check_weights_shape(model: Any) -> Dict[str, tuple]:
-        """
-        检查权重形状
 
-        参数：
-            model: 模型实例
-        返回：
-            {权重名: 形状}
-        """
-        try:
-            weights = model.get_weights()
-            weight_shapes = {}
+# ======================================================
+# 模型工具函数
+# ======================================================
+def freeze_layers(model: tf.keras.Model, num_layers: int = None) -> None:
+    """
+    冻结模型的层（用于迁移学习）
 
-            for i, weight in enumerate(weights):
-                weight_shapes[f"weight_{i}"] = weight.shape
+    参数:
+        model: Keras模型
+        num_layers: 冻结的层数（None则冻结全部）
+    """
+    if num_layers is None:
+        num_layers = len(model.layers)
 
-            logger.info(f"权重形状检查完成: {len(weight_shapes)}个权重")
-            return weight_shapes
-        except Exception as e:
-            logger.error(f"权重形状检查失败: {str(e)}")
-            return {}
+    for i, layer in enumerate(model.layers):
+        if i < num_layers:
+            layer.trainable = False
+
+    logger.info(f"冻结了前 {num_layers} 层")
+
+
+def unfreeze_layers(model: tf.keras.Model, num_layers: int = None) -> None:
+    """
+    解冻模型的层
+
+    参数:
+        model: Keras模型
+        num_layers: 解冻的层数（None则解冻全部）
+    """
+    if num_layers is None:
+        num_layers = len(model.layers)
+
+    start_idx = len(model.layers) - num_layers
+    for i, layer in enumerate(model.layers):
+        if i >= start_idx:
+            layer.trainable = True
+
+    logger.info(f"解冻了后 {num_layers} 层")
+
+
+def print_model_summary(model: tf.keras.Model) -> None:
+    """
+    打印模型摘要
+
+    参数:
+        model: Keras模型
+    """
+    logger.info("模型结构:")
+    model.summary(print_fn=logger.info)

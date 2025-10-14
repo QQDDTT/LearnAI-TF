@@ -3,7 +3,8 @@
   // Python 相关设置
   // =============================
   "python.analysis.extraPaths": [
-    "${workspaceFolder}/.venv/lib/python3.12/site-packages"
+    // "${workspaceFolder}/.venv/lib/python3.12/site-packages",
+    "${workspaceFolder}"
   ],
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
   "python.terminal.activateEnvironment": true,
