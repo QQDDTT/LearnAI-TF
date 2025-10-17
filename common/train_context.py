@@ -12,6 +12,41 @@ import re
 
 
 # ======================================================
+# 模型类型枚举
+# ======================================================
+
+class ModelType(Enum):
+    """模型类型枚举"""
+    SEQUENTIAL = "sequential"      # 顺序模型
+    FUNCTIONAL = "functional"      # 函数式模型
+    SUBCLASS = "subclass"          # 子类模型
+
+
+class LoopType(Enum):
+    """训练循环类型枚举"""
+    EPOCH_BATCH = "epoch_batch"    # 按 epoch 和 batch 循环（监督学习）
+    EPISODE_STEP = "episode_step"  # 按 episode 和 step 循环（强化学习）
+    ITERATION = "iteration"        # 简单迭代循环
+    CUSTOM = "custom"              # 自定义循环
+
+
+class DataSourceType(Enum):
+    """数据源类型枚举"""
+    SUPERVISED = "supervised"      # 监督学习数据
+    REINFORCEMENT = "reinforcement"  # 强化学习环境
+    CUSTOM = "custom"              # 自定义数据源
+
+
+class EvaluationFrequency(Enum):
+    """评估频率枚举"""
+    EPOCH = "epoch"                # 每个epoch评估一次
+    BATCH = "batch"                # 每个batch评估一次
+    STEP = "step"                  # 每个step评估一次
+    EPISODE = "episode"            # 每个episode评估一次
+    CUSTOM = "custom"              # 自定义频率
+
+
+# ======================================================
 # Bridge 和 Connection 相关枚举
 # ======================================================
 
@@ -353,13 +388,14 @@ def validate_connection_targets(
         errors.append(f"连接类型 '{conn_type}' 需要指定目标层")
         return errors
 
-    # 检查目标层数量
-    min_count = parsed.min_targets_count()
-    if len(targets) < min_count:
-        errors.append(
-            f"连接类型 '{conn_type}' 至少需要 {min_count} 个目标层，"
-            f"但只提供了 {len(targets)} 个"
-        )
+    # 检查目标层数量（仅在需要目标层时检查）
+    if parsed.requires_targets():
+        min_count = parsed.min_targets_count()
+        if len(targets) < min_count:
+            errors.append(
+                f"连接类型 '{conn_type}' 至少需要 {min_count} 个目标层，"
+                f"但只提供了 {len(targets)} 个"
+            )
 
     # 检查目标层是否存在
     for target in targets:
@@ -427,6 +463,136 @@ class ConnectionExamples:
 
     # 分支连接
     BRANCH = "@branch:branch_a,branch_b"
+
+
+# ======================================================
+# 配置数据类
+# ======================================================
+
+@dataclass
+class LayerConfig:
+    """层配置"""
+    reflection: str                    # 层类型反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 层参数
+    name: Optional[str] = None        # 层名称
+    connection: Optional[str] = None  # 连接表达式
+    is_input: bool = False            # 是否为输入层
+    is_output: bool = False           # 是否为输出层
+
+
+@dataclass
+class ModelConfig:
+    """模型配置"""
+    type: str                         # 模型类型: sequential, functional, subclass
+    layers: List[LayerConfig] = field(default_factory=list)  # 层列表
+    reflection: Optional[str] = None  # 自定义模型类的反射路径（用于subclass类型）
+    args: Dict[str, Any] = field(default_factory=dict)  # 模型参数
+
+
+@dataclass
+class DataSourceConfig:
+    """数据源配置"""
+    reflection: str                   # 数据源反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 数据源参数
+    name: Optional[str] = None        # 数据源名称
+
+
+@dataclass
+class OptimizerConfig:
+    """优化器配置"""
+    reflection: str                   # 优化器反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 优化器参数
+    name: Optional[str] = None        # 优化器名称
+
+
+@dataclass
+class LossConfig:
+    """损失函数配置"""
+    reflection: str                   # 损失函数反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 损失函数参数
+    name: Optional[str] = None        # 损失函数名称
+
+
+@dataclass
+class StepConfig:
+    """训练步骤配置"""
+    name: str                         # 步骤名称
+    reflection: str                   # 步骤函数反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 步骤参数
+    bridge: Optional[str] = None      # Bridge表达式
+
+
+@dataclass
+class PipelineConfig:
+    """训练流程配置"""
+    loop_type: str                    # 循环类型: epoch_batch, episode_step, iteration, custom
+    steps: List[StepConfig] = field(default_factory=list)  # 步骤列表
+    parameters: Dict[str, Any] = field(default_factory=dict)  # 流程参数
+    loop_condition: Optional[str] = None  # 循环条件
+
+
+@dataclass
+class EvaluationConfig:
+    """评估配置"""
+    reflection: str                   # 评估函数反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 评估参数
+    frequency: str = "epoch"          # 评估频率
+    metrics: List[str] = field(default_factory=list)  # 评估指标
+    name: Optional[str] = None        # 评估名称
+
+
+@dataclass
+class DeploymentConfig:
+    """部署配置"""
+    reflection: str                   # 部署函数反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 部署参数
+    target: str = "local"             # 部署目标: local, cloud, edge
+    name: Optional[str] = None        # 部署名称
+
+
+@dataclass
+class ExportConfig:
+    """导出配置"""
+    reflection: str                   # 导出函数反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 导出参数
+    format: str = "savedmodel"        # 导出格式: savedmodel, onnx, tflite, etc.
+    name: Optional[str] = None        # 导出名称
+
+
+@dataclass
+class TrainContext:
+    """
+    训练上下文
+
+    存储所有训练相关的配置和运行时状态
+    """
+    # 配置数据
+    models: Dict[str, ModelConfig] = field(default_factory=dict)
+    data_sources: Dict[str, DataSourceConfig] = field(default_factory=dict)
+    optimizers: Dict[str, OptimizerConfig] = field(default_factory=dict)
+    losses: Dict[str, LossConfig] = field(default_factory=dict)
+    steps: Dict[str, StepConfig] = field(default_factory=dict)
+    training_pipelines: Dict[str, PipelineConfig] = field(default_factory=dict)
+
+    # 训练模式
+    training_mode: str = "supervised"  # 训练模式: supervised, reinforcement, etc.
+
+    # 运行时实例缓存
+    instantiated_models: Dict[str, Any] = field(default_factory=dict)
+    instantiated_optimizers: Dict[str, Any] = field(default_factory=dict)
+    instantiated_losses: Dict[str, Any] = field(default_factory=dict)
+    instantiated_data: Dict[str, Any] = field(default_factory=dict)
+    instantiated_dataloaders: Dict[str, Any] = field(default_factory=dict)
+
+    # 训练状态
+    variables: Dict[str, Any] = field(default_factory=dict)  # 运行时变量
+    global_config: Dict[str, Any] = field(default_factory=dict)  # 全局配置
+    execution_results: Dict[str, Any] = field(default_factory=dict)  # 执行结果
+
+    # 当前状态（循环计数器）
+    current_epoch: int = 0
+    current_episode: int = 0
+    current_step: int = 0
 
 
 # ======================================================

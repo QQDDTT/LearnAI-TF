@@ -8,7 +8,6 @@ modules/export.py
 - modules 中的函数通过反射机制调用
 """
 
-import tensorflow as tf
 from typing import Dict, Any, List, Optional, Callable
 from common.train_context import (
     TrainContext,
@@ -466,13 +465,22 @@ class ModelExporter:
 
         model = self.context.instantiated_models[model_name]
 
+        # 获取 TensorFlow 版本（通过反射）
+        try:
+            tf_version = call_target(
+                reflection="tensorflow:__version__",
+                args={}
+            )
+        except:
+            tf_version = "unknown"
+
         metadata = {
             "model_name": model_name,
             "training_mode": self.context.training_mode,
             "project_name": self.context.project_name,
             "model_version": self.context.model_version,
             "framework": "TensorFlow",
-            "framework_version": tf.__version__
+            "framework_version": tf_version
         }
 
         # 添加模型信息
@@ -482,10 +490,20 @@ class ModelExporter:
         except:
             pass
 
-        # 添加参数数量
+        # 添加参数数量（通过反射调用 tensorflow.size）
         try:
-            trainable_params = sum([tf.size(v).numpy() for v in model.trainable_variables])
-            total_params = sum([tf.size(v).numpy() for v in model.variables])
+            trainable_params = sum([
+                call_target(
+                    reflection="tensorflow:size",
+                    args={"input": v}
+                ).numpy() for v in model.trainable_variables
+            ])
+            total_params = sum([
+                call_target(
+                    reflection="tensorflow:size",
+                    args={"input": v}
+                ).numpy() for v in model.variables
+            ])
 
             metadata["trainable_parameters"] = int(trainable_params)
             metadata["total_parameters"] = int(total_params)

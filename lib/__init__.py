@@ -4,22 +4,40 @@ lib/__init__.py
 lib模块初始化文件
 """
 
-# 数据和训练工具
-from lib.utils import (
+# 数据加载工具
+from lib.data_loader import (
     build_csv_dataset,
     build_numpy_dataset,
+    split_dataset,
+    normalize_data,
+    create_batches
+)
+
+# 数据处理工具
+from lib.data_utils import (
     get_batch,
     get_all_data,
+    prepare_batch
+)
+
+# 训练工具
+from lib.training_utils import (
     forward,
+    compute_loss,
     compute_gradients,
     apply_gradients,
-    compute_loss,
-    compute_metrics,
-    check_condition
+    compute_metrics
+)
+
+# 条件检查工具
+from lib.condition_utils import (
+    check_condition,
+    check_threshold,
+    check_convergence_simple
 )
 
 # 强化学习工具
-from lib.rl_utils import (
+from lib.reinforcement_learning import (
     NetworkClient,
     build_web_dataset,
     observe_state,
@@ -77,17 +95,29 @@ from lib.deployment import (
 )
 
 __all__ = [
-    # 数据和训练工具
+    # 数据加载工具
     'build_csv_dataset',
     'build_numpy_dataset',
+    'split_dataset',
+    'normalize_data',
+    'create_batches',
+
+    # 数据处理工具
     'get_batch',
     'get_all_data',
+    'prepare_batch',
+
+    # 训练工具
     'forward',
+    'compute_loss',
     'compute_gradients',
     'apply_gradients',
-    'compute_loss',
     'compute_metrics',
+
+    # 条件检查工具
     'check_condition',
+    'check_threshold',
+    'check_convergence_simple',
 
     # 强化学习工具
     'NetworkClient',

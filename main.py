@@ -10,7 +10,7 @@ main.py
 import os
 import sys
 import argparse
-from common.common import LoggerManager, load_config_from_yaml
+from common.common import LoggerManager, load_yaml
 from modules import data_manager, models, optimizers, losses, training_pipeline
 from modules import evaluation, export, deployment
 
@@ -28,28 +28,43 @@ def main():
     5. 执行训练
     6. 执行评估
     7. 导出模型
-    8. 部署模型（可选）
+    8. 部署模型（可选，通过 -d/--deployment 开关控制）
     """
-    parser = argparse.ArgumentParser(description="LearnAI Training Framework")
+    parser = argparse.ArgumentParser(
+        description="LearnAI Training Framework",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例用法:
+  # 仅训练和评估（不部署）
+  python main.py config/game2048_training.yaml
+
+  # 训练、评估并部署模型
+  python main.py config/game2048_training.yaml -d
+  python main.py config/game2048_training.yaml --deployment
+
+  # 显示帮助信息
+  python main.py --help
+        """
+    )
     parser.add_argument(
         "config",
         type=str,
-        help="配置文件路径 (例如: config/config_example.yaml)"
+        help="配置文件路径 (例如: config_example.yaml)"
+    )
+    parser.add_argument(
+        "-d", "--deployment",
+        action="store_true",
+        help="启用模型部署（默认：关闭）。即使配置文件中定义了部署配置，也需要此参数才会执行部署"
     )
     args = parser.parse_args()
-
-    config_path = args.config
-    if not os.path.exists(config_path):
-        logger.error(f"配置文件不存在: {config_path}")
-        sys.exit(1)
 
     logger.info("=" * 80)
     logger.info("LearnAI Training Framework 启动")
     logger.info("=" * 80)
 
     # ========== 1. 加载配置 ==========
-    logger.info(f"加载配置文件: {config_path}")
-    config = load_config_from_yaml(config_path)
+    logger.info(f"加载配置文件: {args.config}")
+    config = load_yaml(args.config)
     if not config:
         logger.error("配置文件加载失败")
         sys.exit(1)
@@ -96,14 +111,14 @@ def main():
     logger.info("-" * 80)
     logger.info("步骤 5: 开始训练")
     logger.info("-" * 80)
-    training_results = training_pipeline.run_training(context)
+    training_pipeline.run_training(context)
     logger.info("训练完成")
 
     # ========== 8. 执行评估 ==========
     logger.info("-" * 80)
     logger.info("步骤 6: 开始评估")
     logger.info("-" * 80)
-    evaluation_results = evaluation.run_evaluation(context)
+    evaluation.run_evaluation(context)
     logger.info("评估完成")
 
     # ========== 9. 导出模型 ==========
@@ -111,20 +126,25 @@ def main():
         logger.info("-" * 80)
         logger.info("步骤 7: 导出模型")
         logger.info("-" * 80)
-        export_results = export.export_model(context)
+        export.export_model(context)
         logger.info("模型导出完成")
     else:
         logger.info("跳过模型导出（配置文件中未定义）")
 
     # ========== 10. 部署模型 ==========
-    if "deployment" in config:
-        logger.info("-" * 80)
-        logger.info("步骤 8: 部署模型")
-        logger.info("-" * 80)
-        deployment_results = deployment.deploy_model(context)
-        logger.info("模型部署完成")
+    # 仅当使用 -d 或 --deployment 参数时才执行部署
+    if args.deployment:
+        if "deployment" in config:
+            logger.info("-" * 80)
+            logger.info("步骤 8: 部署模型")
+            logger.info("-" * 80)
+            deployment.deploy_model(context)
+            logger.info("模型部署完成")
+        else:
+            logger.warning("无法部署：配置文件中未定义 deployment 配置")
+            logger.warning("请在配置文件中添加 deployment 部分")
     else:
-        logger.info("跳过模型部署（配置文件中未定义）")
+        logger.info("跳过模型部署（未使用 -d/--deployment 参数）")
 
     # ========== 11. 完成 ==========
     logger.info("=" * 80)

@@ -45,10 +45,18 @@ scikit-learn>=1.3.0         # 聚类评估、数据预处理
                             # 用于: 轮廓系数、Davies-Bouldin指数等
 
 # =========================
-# 模型导出（可选）
+# 模型导出与部署（可选）
 # =========================
 tf2onnx>=1.15.0             # TensorFlow → ONNX 模型导出
                             # 用于Java服务部署
+onnxruntime>=1.16.0         # ONNX模型推理引擎
+                            # 用于: lib/deployment.py的ONNX模型加载
+flask>=3.0.0                # Web框架（REST API服务器）
+                            # 用于: lib/deployment.py的RestAPIServer
+grpcio>=1.60.0              # gRPC框架（高性能RPC服务）
+                            # 用于: lib/deployment.py的GRPCServer
+boto3>=1.34.0               # AWS SDK（Lambda部署）
+                            # 用于: lib/deployment.py的LambdaDeployer
 
 # =========================
 # 开发工具
@@ -100,7 +108,13 @@ pytest-cov>=4.1.0           # 测试覆盖率
 #    → scikit-learn
 #
 # 📦 ONNX模型导出（用于Java部署）
-#    → tf2onnx
+#    → tf2onnx, onnxruntime
+#
+# 🌐 REST/gRPC API服务部署
+#    → flask, grpcio
+#
+# ☁️ AWS Lambda部署
+#    → boto3
 #
 # 🔬 开发和测试
 #    → jupyter, pytest
@@ -146,9 +160,7 @@ pytest-cov>=4.1.0           # 测试覆盖率
 #   pip install mlflow>=2.10.0
 #   # MLflow实验管理
 #
-# 【云存储】
-#   pip install boto3>=1.34.0
-#   # AWS S3存储
+# 【云存储】（boto3已包含在核心依赖中用于Lambda部署）
 #   pip install google-cloud-storage>=2.14.0
 #   # Google Cloud Storage
 #
