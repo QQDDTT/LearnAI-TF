@@ -1,619 +1,807 @@
 # -*- coding: utf-8 -*-
 """
 modules/evaluation.py
-评估模块：
-- 模型评估
-- 指标计算
-- 结果记录和可视化
+评估模块：从配置上下文执行模型评估
+
+导入限制：
+- 仅导入 common 文件夹内的函数
+- lib 中的函数通过反射机制调用
 """
 
-import tensorflow as tf
-import numpy as np
-from typing import Dict, Any, List, Optional
-from common.common import LoggerManager
-from common import utils
+from typing import Dict, Any, List, Optional, Callable, Tuple
+from common.train_context import (
+    TrainContext,
+    EvaluationConfig,
+    EvaluationFrequency
+)
+from common.common import call_target
 
-logger = LoggerManager.get_logger(__file__)
 
-
-# ======================================================
-# 主评估函数
-# ======================================================
-def run_evaluation(eval_config: Dict, context: Dict) -> Dict[str, Any]:
+class Evaluator:
     """
-    根据训练模式执行评估
+    评估器
 
-    参数:
-        eval_config: 评估配置
-        context: 训练上下文
+    职责：
+    1. 读取 TrainContext 中的评估配置
+    2. 执行模型评估
+    3. 计算评估指标
+    4. 支持多种评估频率（每epoch、每step、自定义）
+    5. 管理评估结果和历史
 
-    返回:
-        dict: 评估结果
-
-    示例:
-        >>> results = run_evaluation(eval_config, context)
-        >>> print(results)
+    注意：所有评估步骤通过 call_target 动态调用
     """
-    training_mode = context["training_mode"]
-    logger.info(f"执行 {training_mode} 模式评估")
 
-    if training_mode == "supervised":
-        return evaluate_supervised(eval_config.get("supervised_eval", {}), context)
-    elif training_mode == "reinforcement":
-        return evaluate_reinforcement(eval_config.get("rl_eval", {}), context)
-    elif training_mode in ["self_supervised", "unsupervised"]:
-        return evaluate_unsupervised(eval_config.get("unsupervised_eval", {}), context)
-    else:
-        logger.warning(f"未定义的评估方式: {training_mode}")
-        return {}
+    def __init__(self, context: TrainContext):
+        """
+        初始化评估器
 
+        参数:
+            context: 训练上下文
+        """
+        self.context = context
+        self.eval_configs: Dict[str, EvaluationConfig] = {}
+        self.eval_history: Dict[str, List[Dict[str, Any]]] = {}
+        self.best_metrics: Dict[str, Dict[str, float]] = {}
 
-# ======================================================
-# 监督学习评估
-# ======================================================
-def evaluate_supervised(eval_config: Dict, context: Dict) -> Dict[str, float]:
-    """
-    监督学习评估
+    def setup_evaluations(self):
+        """设置所有评估配置"""
+        training_mode = self.context.training_mode
 
-    参数:
-        eval_config: 评估配置
-            - split: 数据集划分 (val/test)
-            - metrics: 指标列表
-            - batch_size: 批大小
-        context: 上下文
-
-    返回:
-        dict: 评估指标 {metric_name: value}
-
-    示例:
-        >>> results = evaluate_supervised(eval_config, context)
-        >>> print(f"准确率: {results['accuracy']:.4f}")
-    """
-    split = eval_config.get("split", "val")
-    metrics_list = eval_config.get("metrics", ["accuracy"])
-
-    # 获取数据加载器和模型
-    dataloader = context["dataloaders"].get(split)
-    model_name = eval_config.get("model", "classifier")
-    model = context["models"].get(model_name)
-
-    if dataloader is None:
-        logger.error(f"无法获取 {split} 数据集")
-        return {}
-
-    if model is None:
-        logger.error(f"无法获取模型: {model_name}")
-        return {}
-
-    logger.info(f"在 {split} 集上评估模型 {model_name}")
-
-    all_predictions = []
-    all_targets = []
-    total_loss = 0.0
-    num_batches = 0
-
-    # 获取损失函数（如果配置了）
-    loss_fn = None
-    if "loss_fn" in eval_config:
-        loss_fn = context["losses"].get(eval_config["loss_fn"])
-
-    # 遍历数据集
-    for batch in dataloader:
-        if isinstance(batch, (list, tuple)):
-            x, y = batch
+        # 获取当前训练模式的评估配置
+        if training_mode in self.context.evaluations:
+            eval_config = self.context.evaluations[training_mode]
+            self.eval_configs[training_mode] = eval_config
+            self.eval_history[training_mode] = []
+            self.best_metrics[training_mode] = {}
         else:
-            x = batch["x"]
-            y = batch["y"]
+            # 查找通用评估配置
+            if "default" in self.context.evaluations:
+                eval_config = self.context.evaluations["default"]
+                self.eval_configs["default"] = eval_config
+                self.eval_history["default"] = []
+                self.best_metrics["default"] = {}
 
-        # 前向传播
-        predictions = model(x, training=False)
+    def should_evaluate(
+        self,
+        frequency: str,
+        current_epoch: Optional[int] = None,
+        current_step: Optional[int] = None,
+        eval_interval: int = 1
+    ) -> bool:
+        """
+        判断是否应该执行评估
 
-        # 计算损失
-        if loss_fn is not None:
-            loss = loss_fn(y, predictions)
-            total_loss += float(loss.numpy())
+        参数:
+            frequency: 评估频率
+            current_epoch: 当前 epoch
+            current_step: 当前 step
+            eval_interval: 评估间隔
 
-        all_predictions.append(predictions.numpy())
-        all_targets.append(y.numpy())
-        num_batches += 1
+        返回:
+            是否应该评估
+        """
+        if frequency == EvaluationFrequency.EPOCH.value:
+            if current_epoch is None:
+                return False
+            return current_epoch % eval_interval == 0
 
-    # 拼接所有批次
-    all_predictions = np.concatenate(all_predictions, axis=0)
-    all_targets = np.concatenate(all_targets, axis=0)
+        elif frequency == EvaluationFrequency.STEP.value:
+            if current_step is None:
+                return False
+            return current_step % eval_interval == 0
 
-    # 计算指标
-    results = utils.compute_metrics(all_predictions, all_targets, metrics_list)
+        elif frequency == EvaluationFrequency.CUSTOM.value:
+            # 自定义频率由外部控制
+            return True
 
-    # 添加平均损失
-    if loss_fn is not None:
-        results["loss"] = total_loss / num_batches if num_batches > 0 else 0.0
-
-    # 打印结果
-    logger.info("=" * 60)
-    logger.info("评估结果:")
-    for metric_name, metric_value in results.items():
-        logger.info(f"  {metric_name}: {metric_value:.4f}")
-    logger.info("=" * 60)
-
-    return results
-
-
-# ======================================================
-# 强化学习评估
-# ======================================================
-def evaluate_reinforcement(eval_config: Dict, context: Dict) -> Dict[str, float]:
-    """
-    强化学习评估
-
-    参数:
-        eval_config: 评估配置
-            - eval_episodes: 评估的episode数量
-            - metrics: 指标列表
-            - max_steps: 每个episode的最大步数
-        context: 上下文
-
-    返回:
-        dict: 评估指标
-
-    示例:
-        >>> results = evaluate_reinforcement(eval_config, context)
-        >>> print(f"平均奖励: {results['mean_reward']:.2f}")
-    """
-    eval_episodes = eval_config.get("eval_episodes", 10)
-    metrics_list = eval_config.get("metrics", ["mean_reward"])
-    max_steps = eval_config.get("max_steps", 1000)
-
-    # 获取模型和客户端
-    policy_name = eval_config.get("policy", "actor")
-    policy = context["models"].get(policy_name)
-    rl_client = context["dataloaders"].get("client")
-
-    if policy is None:
-        logger.error(f"无法获取策略模型: {policy_name}")
-        return {}
-
-    if rl_client is None:
-        logger.error("无法获取RL客户端")
-        return {}
-
-    logger.info(f"运行 {eval_episodes} 个评估episode")
-
-    episode_results = []
-
-    for episode in range(eval_episodes):
-        # 运行一个完整的episode
-        result = run_eval_episode(policy, rl_client, max_steps)
-        episode_results.append(result)
-
-        logger.debug(f"  Episode {episode + 1}/{eval_episodes}: "
-                    f"奖励={result['total_reward']:.2f}, "
-                    f"步数={result['steps']}, "
-                    f"成功={'是' if result['success'] else '否'}")
-
-    # 聚合指标
-    results = aggregate_episode_metrics(episode_results, metrics_list)
-
-    # 打印结果
-    logger.info("=" * 60)
-    logger.info("评估结果:")
-    for metric_name, metric_value in results.items():
-        logger.info(f"  {metric_name}: {metric_value:.4f}")
-    logger.info("=" * 60)
-
-    return results
-
-
-def run_eval_episode(
-    policy: tf.keras.Model,
-    rl_client,
-    max_steps: int = 1000
-) -> Dict[str, Any]:
-    """
-    运行一个评估episode（确定性策略，不探索）
-
-    参数:
-        policy: 策略模型
-        rl_client: RL客户端
-        max_steps: 最大步数
-
-    返回:
-        dict: episode结果
-            - total_reward: 总奖励
-            - steps: 步数
-            - success: 是否成功
-    """
-    # 重置环境
-    reset_response = rl_client.request("reset")
-    state = np.array(reset_response["state"], dtype=np.float32)
-
-    total_reward = 0.0
-    steps = 0
-    done = False
-
-    while not done and steps < max_steps:
-        # 确定性策略（选择概率最大的动作）
-        action_probs = policy(np.expand_dims(state, 0), training=False)
-        action = int(tf.argmax(action_probs[0]))
-
-        # 执行动作
-        try:
-            step_response = rl_client.request("step", {"action": action})
-            state = np.array(step_response["state"], dtype=np.float32)
-            reward = float(step_response["reward"])
-            done = bool(step_response["done"])
-
-            total_reward += reward
-            steps += 1
-        except Exception as e:
-            logger.error(f"执行动作时出错: {str(e)}")
-            break
-
-    return {
-        "total_reward": total_reward,
-        "steps": steps,
-        "success": done
-    }
-
-
-def aggregate_episode_metrics(
-    episode_results: List[Dict],
-    metrics_list: List[str]
-) -> Dict[str, float]:
-    """
-    聚合多个episode的指标
-
-    参数:
-        episode_results: episode结果列表
-        metrics_list: 要聚合的指标
-
-    返回:
-        dict: 聚合后的指标
-    """
-    results = {}
-
-    if "mean_reward" in metrics_list:
-        rewards = [ep["total_reward"] for ep in episode_results]
-        results["mean_reward"] = float(np.mean(rewards))
-        results["std_reward"] = float(np.std(rewards))
-        results["min_reward"] = float(np.min(rewards))
-        results["max_reward"] = float(np.max(rewards))
-
-    if "mean_episode_length" in metrics_list:
-        lengths = [ep["steps"] for ep in episode_results]
-        results["mean_episode_length"] = float(np.mean(lengths))
-        results["std_episode_length"] = float(np.std(lengths))
-
-    if "success_rate" in metrics_list:
-        successes = [ep["success"] for ep in episode_results]
-        results["success_rate"] = float(np.mean(successes))
-
-    return results
-
-
-# ======================================================
-# 无监督/自监督学习评估
-# ======================================================
-def evaluate_unsupervised(eval_config: Dict, context: Dict) -> Dict[str, float]:
-    """
-    无监督/自监督学习评估
-
-    参数:
-        eval_config: 评估配置
-        context: 上下文
-
-    返回:
-        dict: 评估指标
-
-    示例:
-        >>> results = evaluate_unsupervised(eval_config, context)
-    """
-    logger.info("无监督学习评估")
-
-    eval_type = eval_config.get("type", "reconstruction")
-
-    if eval_type == "reconstruction":
-        return evaluate_reconstruction(eval_config, context)
-    elif eval_type == "clustering":
-        return evaluate_clustering(eval_config, context)
-    else:
-        logger.warning(f"未知的无监督评估类型: {eval_type}")
-        return {}
-
-
-def evaluate_reconstruction(eval_config: Dict, context: Dict) -> Dict[str, float]:
-    """
-    评估重构质量（自编码器）
-
-    参数:
-        eval_config: 评估配置
-        context: 上下文
-
-    返回:
-        dict: 重构指标
-    """
-    dataloader = context["dataloaders"].get("val") or context["dataloaders"].get("train")
-    encoder = context["models"].get("encoder")
-    decoder = context["models"].get("decoder")
-
-    if dataloader is None or encoder is None or decoder is None:
-        logger.error("无法获取数据集或模型")
-        return {}
-
-    total_mse = 0.0
-    total_mae = 0.0
-    num_batches = 0
-
-    for batch in dataloader:
-        if isinstance(batch, (list, tuple)):
-            x, _ = batch
         else:
-            x = batch["x"]
+            return False
 
-        # 编码-解码
-        z = encoder(x, training=False)
-        x_reconstructed = decoder(z, training=False)
+    def evaluate(
+        self,
+        eval_name: Optional[str] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        执行评估
 
-        # 计算重构误差
-        mse = tf.reduce_mean(tf.square(x - x_reconstructed))
-        mae = tf.reduce_mean(tf.abs(x - x_reconstructed))
+        参数:
+            eval_name: 评估配置名称（可选）
+            **kwargs: 额外参数
 
-        total_mse += float(mse.numpy())
-        total_mae += float(mae.numpy())
-        num_batches += 1
+        返回:
+            评估结果
+        """
+        # 确定使用哪个评估配置
+        if eval_name is None:
+            eval_name = self.context.training_mode
+            if eval_name not in self.eval_configs:
+                eval_name = "default"
 
-    results = {
-        "reconstruction_mse": total_mse / num_batches if num_batches > 0 else 0.0,
-        "reconstruction_mae": total_mae / num_batches if num_batches > 0 else 0.0
-    }
+        if eval_name not in self.eval_configs:
+            raise ValueError(f"评估配置 '{eval_name}' 不存在")
 
-    logger.info("重构评估结果:")
-    for metric_name, metric_value in results.items():
-        logger.info(f"  {metric_name}: {metric_value:.4f}")
+        eval_config = self.eval_configs[eval_name]
 
-    return results
+        # 执行评估步骤
+        results = self._execute_evaluation_steps(eval_config, **kwargs)
 
+        # 计算指标
+        metrics = self._compute_metrics(eval_config, results)
 
-def evaluate_clustering(eval_config: Dict, context: Dict) -> Dict[str, float]:
-    """
-    评估聚类质量
-
-    参数:
-        eval_config: 评估配置
-        context: 上下文
-
-    返回:
-        dict: 聚类指标
-    """
-    # 获取聚类结果
-    centroids = context.get("centroids")
-    assignments = context.get("assignments")
-    data = context.get("data")
-
-    if centroids is None or assignments is None or data is None:
-        logger.error("无法获取聚类结果")
-        return {}
-
-    # 计算轮廓系数（需要 scikit-learn）
-    try:
-        from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
-
-        results = {
-            "silhouette_score": float(silhouette_score(data, assignments)),
-            "davies_bouldin_score": float(davies_bouldin_score(data, assignments)),
-            "calinski_harabasz_score": float(calinski_harabasz_score(data, assignments))
+        # 保存结果
+        eval_result = {
+            "epoch": self.context.current_epoch,
+            "step": self.context.current_step,
+            "metrics": metrics,
+            "raw_results": results
         }
 
-        logger.info("聚类评估结果:")
-        for metric_name, metric_value in results.items():
-            logger.info(f"  {metric_name}: {metric_value:.4f}")
+        self.eval_history[eval_name].append(eval_result)
+
+        # 更新最佳指标
+        self._update_best_metrics(eval_name, metrics)
+
+        return eval_result
+
+    def _execute_evaluation_steps(
+        self,
+        eval_config: EvaluationConfig,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        执行评估步骤序列
+
+        参数:
+            eval_config: 评估配置
+            **kwargs: 额外参数
+
+        返回:
+            评估步骤结果
+        """
+        results = {}
+
+        if not eval_config.steps:
+            # 如果没有定义步骤，执行默认评估
+            return self._default_evaluation(eval_config, **kwargs)
+
+        # 执行每个评估步骤
+        for step in eval_config.steps:
+            step_name = step.name
+
+            # 准备参数
+            args = self._prepare_eval_args(step.args, **kwargs)
+
+            # 执行步骤
+            try:
+                result = call_target(
+                    reflection=step.reflection,
+                    args=args
+                )
+                results[step_name] = result
+            except Exception as e:
+                raise RuntimeError(f"执行评估步骤 '{step_name}' 失败: {e}")
 
         return results
 
-    except ImportError:
-        logger.warning("未安装scikit-learn，无法计算聚类指标")
-        logger.info("如需聚类评估功能，请运行: pip install scikit-learn")
+    def _default_evaluation(
+        self,
+        eval_config: EvaluationConfig,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        默认评估流程
 
-        # 返回基本信息
-        return {
-            "num_clusters": len(np.unique(assignments)),
-            "total_samples": len(assignments),
-            "note": "需要安装scikit-learn才能计算完整的聚类指标"
+        参数:
+            eval_config: 评估配置
+            **kwargs: 额外参数
+
+        返回:
+            评估结果
+        """
+        results = {}
+
+        # 获取评估数据
+        split = eval_config.split or "val"
+
+        # 这里需要从数据管理器获取数据
+        # 简化处理
+        results["split"] = split
+        results["metrics"] = {}
+
+        return results
+
+    def _prepare_eval_args(
+        self,
+        args_config: Dict[str, Any],
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        准备评估参数（解析变量引用）
+
+        参数:
+            args_config: 参数配置
+            **kwargs: 额外参数
+
+        返回:
+            解析后的参数
+        """
+        prepared_args = {}
+
+        for key, value in args_config.items():
+            # 解析变量引用 ${variable}
+            if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
+                var_name = value[2:-1]
+                resolved_value = self._resolve_variable(var_name)
+                prepared_args[key] = resolved_value
+
+            elif isinstance(value, dict):
+                prepared_args[key] = self._prepare_eval_args(value, **kwargs)
+
+            elif isinstance(value, list):
+                prepared_args[key] = [
+                    self._prepare_eval_args(item, **kwargs) if isinstance(item, dict) else item
+                    for item in value
+                ]
+
+            else:
+                prepared_args[key] = value
+
+        # 添加额外参数
+        prepared_args.update(kwargs)
+
+        return prepared_args
+
+    def _resolve_variable(self, var_name: str) -> Any:
+        """
+        解析变量引用
+
+        参数:
+            var_name: 变量名
+
+        返回:
+            变量值
+        """
+        # 支持点号访问
+        if '.' in var_name:
+            parts = var_name.split('.')
+            base_name = parts[0]
+            field_path = parts[1:]
+
+            # 从不同位置查找基础变量
+            if base_name in self.context.instantiated_models:
+                value = self.context.instantiated_models[base_name]
+            elif base_name in self.context.instantiated_dataloaders:
+                value = self.context.instantiated_dataloaders[base_name]
+            elif base_name in self.context.execution_results:
+                value = self.context.execution_results[base_name]
+            else:
+                raise ValueError(f"无法解析变量: ${{{var_name}}}")
+
+            # 逐层访问字段
+            for field in field_path:
+                if isinstance(value, dict):
+                    value = value.get(field)
+                elif hasattr(value, field):
+                    value = getattr(value, field)
+                else:
+                    raise ValueError(f"无法访问 '{var_name}'")
+
+            return value
+
+        # 直接变量名
+        if var_name in self.context.instantiated_models:
+            return self.context.instantiated_models[var_name]
+
+        if var_name in self.context.instantiated_optimizers:
+            return self.context.instantiated_optimizers[var_name]
+
+        if var_name in self.context.instantiated_losses:
+            return self.context.instantiated_losses[var_name]
+
+        if var_name in self.context.instantiated_dataloaders:
+            return self.context.instantiated_dataloaders[var_name]
+
+        if var_name in self.context.execution_results:
+            return self.context.execution_results[var_name]
+
+        if hasattr(self.context, var_name):
+            return getattr(self.context, var_name)
+
+        raise ValueError(f"无法解析变量: ${{{var_name}}}")
+
+    def _compute_metrics(
+        self,
+        eval_config: EvaluationConfig,
+        results: Dict[str, Any]
+    ) -> Dict[str, float]:
+        """
+        计算评估指标
+
+        参数:
+            eval_config: 评估配置
+            results: 评估步骤结果
+
+        返回:
+            指标字典
+        """
+        metrics = {}
+
+        if not eval_config.metrics:
+            # 尝试从结果中提取指标
+            for step_name, step_result in results.items():
+                if isinstance(step_result, dict):
+                    for key, value in step_result.items():
+                        if isinstance(value, (int, float)):
+                            metrics[f"{step_name}_{key}"] = float(value)
+            return metrics
+
+        # 根据配置的指标列表计算
+        for metric_name in eval_config.metrics:
+            metric_value = self._extract_metric(metric_name, results)
+            if metric_value is not None:
+                metrics[metric_name] = metric_value
+
+        return metrics
+
+    def _extract_metric(
+        self,
+        metric_name: str,
+        results: Dict[str, Any]
+    ) -> Optional[float]:
+        """
+        从结果中提取指标值
+
+        参数:
+            metric_name: 指标名称
+            results: 结果字典
+
+        返回:
+            指标值
+        """
+        # 支持点号访问：step_name.metric_name
+        if '.' in metric_name:
+            parts = metric_name.split('.')
+            step_name = parts[0]
+            field_path = parts[1:]
+
+            if step_name not in results:
+                return None
+
+            value = results[step_name]
+            for field in field_path:
+                if isinstance(value, dict):
+                    value = value.get(field)
+                elif hasattr(value, field):
+                    value = getattr(value, field)
+                else:
+                    return None
+
+            if isinstance(value, (int, float)):
+                return float(value)
+
+            return None
+
+        # 直接查找
+        for step_result in results.values():
+            if isinstance(step_result, dict) and metric_name in step_result:
+                value = step_result[metric_name]
+                if isinstance(value, (int, float)):
+                    return float(value)
+
+        return None
+
+    def _update_best_metrics(
+        self,
+        eval_name: str,
+        metrics: Dict[str, float]
+    ):
+        """
+        更新最佳指标
+
+        参数:
+            eval_name: 评估名称
+            metrics: 当前指标
+        """
+        if eval_name not in self.best_metrics:
+            self.best_metrics[eval_name] = {}
+
+        best = self.best_metrics[eval_name]
+
+        for metric_name, metric_value in metrics.items():
+            # 判断是否是"越大越好"的指标
+            is_higher_better = self._is_higher_better(metric_name)
+
+            if metric_name not in best:
+                best[metric_name] = metric_value
+            else:
+                if is_higher_better:
+                    if metric_value > best[metric_name]:
+                        best[metric_name] = metric_value
+                else:
+                    if metric_value < best[metric_name]:
+                        best[metric_name] = metric_value
+
+    def _is_higher_better(self, metric_name: str) -> bool:
+        """
+        判断指标是否越大越好
+
+        参数:
+            metric_name: 指标名称
+
+        返回:
+            是否越大越好
+        """
+        # 常见的"越小越好"指标
+        lower_better = ['loss', 'error', 'mse', 'mae', 'rmse']
+
+        metric_lower = metric_name.lower()
+
+        for keyword in lower_better:
+            if keyword in metric_lower:
+                return False
+
+        # 默认越大越好（如 accuracy, precision, recall, f1）
+        return True
+
+    def get_eval_history(
+        self,
+        eval_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        获取评估历史
+
+        参数:
+            eval_name: 评估名称（None 表示当前模式）
+
+        返回:
+            评估历史列表
+        """
+        if eval_name is None:
+            eval_name = self.context.training_mode
+            if eval_name not in self.eval_history:
+                eval_name = "default"
+
+        if eval_name not in self.eval_history:
+            return []
+
+        return self.eval_history[eval_name]
+
+    def get_best_metrics(
+        self,
+        eval_name: Optional[str] = None
+    ) -> Dict[str, float]:
+        """
+        获取最佳指标
+
+        参数:
+            eval_name: 评估名称（None 表示当前模式）
+
+        返回:
+            最佳指标字典
+        """
+        if eval_name is None:
+            eval_name = self.context.training_mode
+            if eval_name not in self.best_metrics:
+                eval_name = "default"
+
+        if eval_name not in self.best_metrics:
+            return {}
+
+        return self.best_metrics[eval_name].copy()
+
+    def get_latest_metrics(
+        self,
+        eval_name: Optional[str] = None
+    ) -> Dict[str, float]:
+        """
+        获取最新的评估指标
+
+        参数:
+            eval_name: 评估名称（None 表示当前模式）
+
+        返回:
+            最新指标字典
+        """
+        history = self.get_eval_history(eval_name)
+
+        if not history:
+            return {}
+
+        return history[-1]["metrics"]
+
+    def compare_with_best(
+        self,
+        current_metrics: Dict[str, float],
+        eval_name: Optional[str] = None
+    ) -> Dict[str, bool]:
+        """
+        将当前指标与最佳指标比较
+
+        参数:
+            current_metrics: 当前指标
+            eval_name: 评估名称
+
+        返回:
+            比较结果 {metric_name: is_better}
+        """
+        best_metrics = self.get_best_metrics(eval_name)
+
+        comparison = {}
+
+        for metric_name, current_value in current_metrics.items():
+            if metric_name not in best_metrics:
+                comparison[metric_name] = True
+                continue
+
+            best_value = best_metrics[metric_name]
+            is_higher_better = self._is_higher_better(metric_name)
+
+            if is_higher_better:
+                comparison[metric_name] = current_value > best_value
+            else:
+                comparison[metric_name] = current_value < best_value
+
+        return comparison
+
+    def is_best_epoch(
+        self,
+        metric_name: str,
+        eval_name: Optional[str] = None
+    ) -> bool:
+        """
+        判断当前是否是最佳 epoch
+
+        参数:
+            metric_name: 关注的指标名称
+            eval_name: 评估名称
+
+        返回:
+            是否是最佳 epoch
+        """
+        latest_metrics = self.get_latest_metrics(eval_name)
+
+        if metric_name not in latest_metrics:
+            return False
+
+        best_metrics = self.get_best_metrics(eval_name)
+
+        if metric_name not in best_metrics:
+            return True
+
+        return latest_metrics[metric_name] == best_metrics[metric_name]
+
+    def format_metrics(
+        self,
+        metrics: Dict[str, float],
+        precision: int = 4
+    ) -> str:
+        """
+        格式化指标输出
+
+        参数:
+            metrics: 指标字典
+            precision: 小数精度
+
+        返回:
+            格式化字符串
+        """
+        if not metrics:
+            return "No metrics"
+
+        parts = []
+        for name, value in metrics.items():
+            parts.append(f"{name}: {value:.{precision}f}")
+
+        return ", ".join(parts)
+
+    def get_metrics_summary(
+        self,
+        eval_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        获取指标摘要
+
+        参数:
+            eval_name: 评估名称
+
+        返回:
+            摘要字典
+        """
+        history = self.get_eval_history(eval_name)
+        best_metrics = self.get_best_metrics(eval_name)
+        latest_metrics = self.get_latest_metrics(eval_name)
+
+        summary = {
+            "total_evaluations": len(history),
+            "best_metrics": best_metrics,
+            "latest_metrics": latest_metrics,
+            "improvement_over_best": {}
         }
 
+        # 计算相对于最佳的改进/退步
+        for metric_name, latest_value in latest_metrics.items():
+            if metric_name in best_metrics:
+                best_value = best_metrics[metric_name]
+                if best_value != 0:
+                    improvement = (latest_value - best_value) / abs(best_value) * 100
+                    summary["improvement_over_best"][metric_name] = improvement
 
-# ======================================================
-# 评估工具函数
-# ======================================================
-def compute_confusion_matrix(
-    predictions: np.ndarray,
-    targets: np.ndarray,
-    num_classes: Optional[int] = None
-) -> np.ndarray:
+        return summary
+
+
+class EpisodeEvaluator(Evaluator):
     """
-    计算混淆矩阵
+    Episode 评估器（用于强化学习）
 
-    参数:
-        predictions: 预测结果 [n_samples, n_classes] 或 [n_samples]
-        targets: 真实标签 [n_samples, n_classes] 或 [n_samples]
-        num_classes: 类别数（可选，自动推断）
-
-    返回:
-        混淆矩阵 [num_classes, num_classes]
-
-    示例:
-        >>> cm = compute_confusion_matrix(predictions, targets)
-        >>> print(cm)
+    扩展 Evaluator，添加 episode 相关的评估功能
     """
-    # 转换为标签索引
-    if len(predictions.shape) > 1 and predictions.shape[-1] > 1:
-        pred_labels = np.argmax(predictions, axis=-1)
-    else:
-        pred_labels = predictions.astype(int)
 
-    if len(targets.shape) > 1 and targets.shape[-1] > 1:
-        true_labels = np.argmax(targets, axis=-1)
-    else:
-        true_labels = targets.astype(int)
+    def evaluate_episodes(
+        self,
+        num_episodes: int,
+        deterministic: bool = True,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        评估多个 episodes
 
-    # 推断类别数
-    if num_classes is None:
-        num_classes = max(pred_labels.max(), true_labels.max()) + 1
+        参数:
+            num_episodes: 评估的 episode 数量
+            deterministic: 是否使用确定性策略
+            **kwargs: 额外参数
 
-    # 计算混淆矩阵
-    confusion_matrix = np.zeros((num_classes, num_classes), dtype=np.int32)
+        返回:
+            评估结果
+        """
+        eval_name = kwargs.get('eval_name', self.context.training_mode)
 
-    for true_label, pred_label in zip(true_labels, pred_labels):
-        if 0 <= true_label < num_classes and 0 <= pred_label < num_classes:
-            confusion_matrix[true_label, pred_label] += 1
+        if eval_name not in self.eval_configs:
+            raise ValueError(f"评估配置 '{eval_name}' 不存在")
 
-    return confusion_matrix
+        eval_config = self.eval_configs[eval_name]
 
+        # 获取 episode 评估参数
+        eval_episodes = eval_config.eval_episodes or num_episodes
 
-def print_confusion_matrix(
-    confusion_matrix: np.ndarray,
-    class_names: Optional[List[str]] = None
-) -> None:
-    """
-    打印混淆矩阵
+        episodes_results = []
 
-    参数:
-        confusion_matrix: 混淆矩阵
-        class_names: 类别名称列表
+        # 执行多个 episodes
+        for episode_idx in range(eval_episodes):
+            episode_result = self._evaluate_single_episode(
+                eval_config,
+                deterministic=deterministic,
+                **kwargs
+            )
+            episodes_results.append(episode_result)
 
-    示例:
-        >>> print_confusion_matrix(cm, ["cat", "dog"])
-    """
-    num_classes = confusion_matrix.shape[0]
+        # 聚合结果
+        aggregated_metrics = self._aggregate_episode_metrics(episodes_results)
 
-    if class_names is None:
-        class_names = [f"Class{i}" for i in range(num_classes)]
-
-    logger.info("混淆矩阵:")
-
-    # 打印表头
-    header = "真实\\预测 |" + " | ".join([f"{name:^10}" for name in class_names])
-    logger.info(header)
-    logger.info("-" * len(header))
-
-    # 打印每一行
-    for i, row in enumerate(confusion_matrix):
-        row_str = f"{class_names[i]:^10} |" + " | ".join([f"{val:^10}" for val in row])
-        logger.info(row_str)
-
-
-def compute_classification_report(
-    predictions: np.ndarray,
-    targets: np.ndarray,
-    class_names: Optional[List[str]] = None
-) -> Dict[str, Dict[str, float]]:
-    """
-    生成分类报告
-
-    参数:
-        predictions: 预测结果
-        targets: 真实标签
-        class_names: 类别名称
-
-    返回:
-        dict: 每个类别的精确率、召回率、F1分数
-
-    示例:
-        >>> report = compute_classification_report(predictions, targets)
-        >>> print(report)
-    """
-    # 转换为标签索引
-    if len(predictions.shape) > 1 and predictions.shape[-1] > 1:
-        pred_labels = np.argmax(predictions, axis=-1)
-        num_classes = predictions.shape[-1]
-    else:
-        pred_labels = predictions.astype(int)
-        num_classes = pred_labels.max() + 1
-
-    if len(targets.shape) > 1 and targets.shape[-1] > 1:
-        true_labels = np.argmax(targets, axis=-1)
-    else:
-        true_labels = targets.astype(int)
-
-    if class_names is None:
-        class_names = [f"Class{i}" for i in range(num_classes)]
-
-    report = {}
-
-    for i, class_name in enumerate(class_names):
-        # 计算该类别的指标
-        tp = np.sum((pred_labels == i) & (true_labels == i))
-        fp = np.sum((pred_labels == i) & (true_labels != i))
-        fn = np.sum((pred_labels != i) & (true_labels == i))
-
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * precision * recall / (precision + recall + 1e-8)
-
-        support = np.sum(true_labels == i)
-
-        report[class_name] = {
-            "precision": float(precision),
-            "recall": float(recall),
-            "f1-score": float(f1),
-            "support": int(support)
+        # 保存结果
+        eval_result = {
+            "epoch": self.context.current_epoch,
+            "num_episodes": eval_episodes,
+            "metrics": aggregated_metrics,
+            "episodes": episodes_results
         }
 
-    return report
+        self.eval_history[eval_name].append(eval_result)
+        self._update_best_metrics(eval_name, aggregated_metrics)
+
+        return eval_result
+
+    def _evaluate_single_episode(
+        self,
+        eval_config: EvaluationConfig,
+        deterministic: bool = True,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        评估单个 episode
+
+        参数:
+            eval_config: 评估配置
+            deterministic: 是否确定性
+            **kwargs: 额外参数
+
+        返回:
+            Episode 结果
+        """
+        # 执行评估步骤
+        results = self._execute_evaluation_steps(
+            eval_config,
+            deterministic=deterministic,
+            **kwargs
+        )
+
+        return results
+
+    def _aggregate_episode_metrics(
+        self,
+        episodes: List[Dict[str, Any]]
+    ) -> Dict[str, float]:
+        """
+        聚合多个 episodes 的指标
+
+        参数:
+            episodes: Episodes 结果列表
+
+        返回:
+            聚合后的指标
+        """
+        if not episodes:
+            return {}
+
+        # 收集所有指标
+        all_metrics = {}
+        for episode in episodes:
+            if 'total_reward' in episode:
+                if 'total_reward' not in all_metrics:
+                    all_metrics['total_reward'] = []
+                all_metrics['total_reward'].append(episode['total_reward'])
+
+            if 'episode_length' in episode:
+                if 'episode_length' not in all_metrics:
+                    all_metrics['episode_length'] = []
+                all_metrics['episode_length'].append(episode['episode_length'])
+
+            if 'success' in episode:
+                if 'success_rate' not in all_metrics:
+                    all_metrics['success_rate'] = []
+                all_metrics['success_rate'].append(float(episode['success']))
+
+        # 计算聚合统计
+        aggregated = {}
+        for metric_name, values in all_metrics.items():
+            if metric_name == 'success_rate':
+                aggregated['success_rate'] = sum(values) / len(values)
+            else:
+                aggregated[f'mean_{metric_name}'] = sum(values) / len(values)
+                aggregated[f'std_{metric_name}'] = (
+                    sum((x - aggregated[f'mean_{metric_name}'])**2 for x in values) / len(values)
+                ) ** 0.5
+                aggregated[f'min_{metric_name}'] = min(values)
+                aggregated[f'max_{metric_name}'] = max(values)
+
+        return aggregated
 
 
-def print_classification_report(report: Dict[str, Dict[str, float]]) -> None:
+def create_evaluator(context: TrainContext) -> Evaluator:
     """
-    打印分类报告
+    创建评估器的便捷函数
 
     参数:
-        report: 分类报告字典
+        context: 训练上下文
 
-    示例:
-        >>> print_classification_report(report)
+    返回:
+        Evaluator 实例
     """
-    logger.info("分类报告:")
-    logger.info(f"{'类别':^15} | {'精确率':^10} | {'召回率':^10} | {'F1分数':^10} | {'样本数':^10}")
-    logger.info("-" * 70)
-
-    for class_name, metrics in report.items():
-        logger.info(f"{class_name:^15} | "
-                   f"{metrics['precision']:^10.4f} | "
-                   f"{metrics['recall']:^10.4f} | "
-                   f"{metrics['f1-score']:^10.4f} | "
-                   f"{metrics['support']:^10}")
-
-
-def save_evaluation_results(
-    results: Dict[str, float],
-    output_path: str,
-    format: str = "json"
-) -> None:
-    """
-    保存评估结果到文件
-
-    参数:
-        results: 评估结果字典
-        output_path: 输出路径
-        format: 保存格式 ("json" 或 "csv")
-
-    示例:
-        >>> save_evaluation_results(results, "eval_results.json")
-    """
-    import json
-    import os
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    if format == "json":
-        with open(output_path, 'w') as f:
-            json.dump(results, f, indent=2)
-        logger.info(f"评估结果已保存到: {output_path}")
-
-    elif format == "csv":
-        import pandas as pd
-        df = pd.DataFrame([results])
-        df.to_csv(output_path, index=False)
-        logger.info(f"评估结果已保存到: {output_path}")
-
+    # 根据训练模式选择评估器
+    if context.training_mode == "reinforcement":
+        evaluator = EpisodeEvaluator(context)
     else:
-        logger.error(f"未知的保存格式: {format}")
+        evaluator = Evaluator(context)
+
+    evaluator.setup_evaluations()
+    return evaluator
+
+
+def evaluate_model(
+    context: TrainContext,
+    eval_name: Optional[str] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    评估模型的便捷函数
+
+    参数:
+        context: 训练上下文
+        eval_name: 评估配置名称
+        **kwargs: 额外参数
+
+    返回:
+        评估结果
+    """
+    evaluator = create_evaluator(context)
+    return evaluator.evaluate(eval_name, **kwargs)

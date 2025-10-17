@@ -8,8 +8,6 @@
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
       "args": [
-        "train",
-        "--config",
         "${input:selectConfig}"
       ],
       "env": {
@@ -23,8 +21,6 @@
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
       "args": [
-        "evaluate",
-        "--config",
         "${input:selectConfig}"
       ],
       "env": {
@@ -38,11 +34,10 @@
       "type": "pickString",
       "description": "选择要使用的配置文件",
       "options": [
-        "config/config.yaml",
-        "config/config2.yaml",
-        "config/config3.yaml"
+        "config_test.yaml",
+        "game2048_training.yaml"
       ],
-      "default": "config/config.yaml"
+      "default": "config_test.yaml"
     }
   ]
 }

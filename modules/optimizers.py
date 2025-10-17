@@ -1,480 +1,781 @@
 # -*- coding: utf-8 -*-
 """
 modules/optimizers.py
-优化器模块：
-- 构建优化器
-- 学习率调度
-- 优化器管理
+优化器构建器：从配置上下文构建优化器
+
+导入限制：
+- 仅导入 common 文件夹内的函数
+- modules 中的函数通过反射机制调用
 """
 
-import tensorflow as tf
-from typing import Dict, Any
-from common.common import LoggerManager, call_target
+from typing import Dict, Any, List, Optional, Callable, Tuple
+from common.train_context import (
+    TrainContext,
+    OptimizerConfig
+)
+from common.common import call_target
 
-logger = LoggerManager.get_logger(__file__)
 
-
-# ======================================================
-# 主构建函数
-# ======================================================
-def build_all_optimizers(config: Dict) -> Dict[str, tf.keras.optimizers.Optimizer]:
+class OptimizerBuilder:
     """
-    构建所有优化器
+    优化器构建器
 
-    参数:
-        config: optimizers配置
+    职责：
+    1. 读取 TrainContext 中的优化器配置
+    2. 使用 call_target 实例化优化器
+    3. 支持学习率调度
+    4. 支持梯度裁剪和累积
+    5. 支持多优化器策略
 
-    返回:
-        dict: 优化器字典 {optimizer_name: optimizer}
-
-    示例:
-        >>> config = {
-        >>>     "adam": {
-        >>>         "reflection": "tensorflow.keras.optimizers.Adam",
-        >>>         "args": {"learning_rate": 0.001}
-        >>>     }
-        >>> }
-        >>> opts = build_all_optimizers(config)
+    注意：所有优化器通过 call_target 动态创建
     """
-    optimizer_dict = {}
 
-    for optimizer_name, optimizer_config in config.items():
-        logger.info(f"构建优化器: {optimizer_name}")
+    def __init__(self, context: TrainContext):
+        """
+        初始化优化器构建器
 
-        try:
-            optimizer = call_target(
-                optimizer_config["reflection"],
-                optimizer_config.get("args", {})
+        参数:
+            context: 训练上下文
+        """
+        self.context = context
+        self.optimizers: Dict[str, Any] = {}
+        self.lr_schedules: Dict[str, Any] = {}
+
+    def build_all_optimizers(self) -> Dict[str, Any]:
+        """
+        构建所有优化器
+
+        返回:
+            优化器字典 {optimizer_name: optimizer_instance}
+        """
+        if not self.context.optimizers:
+            raise ValueError("TrainContext 中没有定义任何优化器")
+
+        optimizers = {}
+
+        for opt_name, opt_config in self.context.optimizers.items():
+            try:
+                optimizer = self.build_optimizer(opt_name, opt_config)
+                optimizers[opt_name] = optimizer
+            except Exception as e:
+                raise RuntimeError(f"构建优化器 '{opt_name}' 失败: {e}")
+
+        # 缓存到上下文
+        self.context.instantiated_optimizers = optimizers
+
+        return optimizers
+
+    def build_optimizer(
+        self,
+        opt_name: str,
+        opt_config: OptimizerConfig
+    ) -> Any:
+        """
+        构建单个优化器
+
+        参数:
+            opt_name: 优化器名称
+            opt_config: 优化器配置
+
+        返回:
+            优化器实例
+        """
+        if not opt_config.reflection:
+            raise ValueError(f"优化器 '{opt_name}' 缺少 reflection 字段")
+
+        # 准备参数
+        args = opt_config.args.copy()
+
+        # 处理学习率调度
+        if 'learning_rate' in args:
+            lr = args['learning_rate']
+
+            # 如果学习率是字典，表示需要创建调度器
+            if isinstance(lr, dict):
+                lr_schedule = self._build_lr_schedule(opt_name, lr)
+                args['learning_rate'] = lr_schedule
+                self.lr_schedules[opt_name] = lr_schedule
+
+        # 添加名称（如果优化器支持）
+        if 'name' not in args:
+            args['name'] = opt_name
+
+        # 使用 call_target 实例化优化器
+        optimizer = call_target(
+            reflection=opt_config.reflection,
+            args=args
+        )
+
+        return optimizer
+
+    def _build_lr_schedule(
+        self,
+        opt_name: str,
+        lr_config: Dict[str, Any]
+    ) -> Any:
+        """
+        构建学习率调度器
+
+        参数:
+            opt_name: 优化器名称
+            lr_config: 学习率配置
+
+        返回:
+            学习率调度器实例
+        """
+        if 'type' not in lr_config:
+            raise ValueError(f"学习率配置缺少 'type' 字段")
+
+        schedule_type = lr_config['type']
+        schedule_args = lr_config.get('args', {})
+
+        # 根据类型构建不同的调度器
+        if schedule_type == "exponential_decay":
+            schedule = call_target(
+                reflection="tensorflow.keras.optimizers.schedules:ExponentialDecay",
+                args=schedule_args
             )
 
-            optimizer_dict[optimizer_name] = optimizer
+        elif schedule_type == "polynomial_decay":
+            schedule = call_target(
+                reflection="tensorflow.keras.optimizers.schedules:PolynomialDecay",
+                args=schedule_args
+            )
 
-            # 打印优化器信息
-            logger.debug(f"  类型: {type(optimizer).__name__}")
-            if hasattr(optimizer, 'learning_rate'):
-                lr = optimizer.learning_rate
-                if isinstance(lr, tf.keras.optimizers.schedules.LearningRateSchedule):
-                    logger.debug(f"  学习率: 动态调度")
-                else:
-                    logger.debug(f"  学习率: {float(lr.numpy())}")
+        elif schedule_type == "piecewise_constant":
+            schedule = call_target(
+                reflection="tensorflow.keras.optimizers.schedules:PiecewiseConstantDecay",
+                args=schedule_args
+            )
 
-        except Exception as e:
-            logger.error(f"构建优化器 {optimizer_name} 失败: {str(e)}")
-            raise
+        elif schedule_type == "cosine_decay":
+            schedule = call_target(
+                reflection="tensorflow.keras.optimizers.schedules:CosineDecay",
+                args=schedule_args
+            )
 
-    return optimizer_dict
+        elif schedule_type == "cosine_decay_restarts":
+            schedule = call_target(
+                reflection="tensorflow.keras.optimizers.schedules:CosineDecayRestarts",
+                args=schedule_args
+            )
 
+        elif schedule_type == "inverse_time_decay":
+            schedule = call_target(
+                reflection="tensorflow.keras.optimizers.schedules:InverseTimeDecay",
+                args=schedule_args
+            )
 
-# ======================================================
-# 学习率调度器
-# ======================================================
-class CustomLearningRateScheduler:
-    """
-    自定义学习率调度器
-    支持多种调度策略
+        elif schedule_type == "custom":
+            # 自定义调度器（通过 reflection）
+            if 'reflection' not in lr_config:
+                raise ValueError("自定义学习率调度器需要 'reflection' 字段")
 
-    参数:
-        schedule_type: 调度类型 (step/exponential/cosine/warmup/polynomial)
-        initial_lr: 初始学习率
-        **kwargs: 其他参数
+            schedule = call_target(
+                reflection=lr_config['reflection'],
+                args=schedule_args
+            )
 
-    示例:
-        >>> scheduler = CustomLearningRateScheduler(
-        >>>     schedule_type="cosine",
-        >>>     initial_lr=0.001,
-        >>>     total_steps=10000
-        >>> )
-        >>> lr = scheduler(step=1000)
-    """
-    def __init__(self, schedule_type: str, initial_lr: float, **kwargs):
-        self.schedule_type = schedule_type
-        self.initial_lr = initial_lr
-        self.kwargs = kwargs
-
-        logger.info(f"创建学习率调度器: {schedule_type}")
-
-    def __call__(self, step: int) -> float:
-        """
-        计算当前步的学习率
-
-        参数:
-            step: 当前训练步数
-
-        返回:
-            学习率
-        """
-        if self.schedule_type == "step":
-            return self._step_decay(step)
-        elif self.schedule_type == "exponential":
-            return self._exponential_decay(step)
-        elif self.schedule_type == "cosine":
-            return self._cosine_decay(step)
-        elif self.schedule_type == "warmup":
-            return self._warmup_cosine_decay(step)
-        elif self.schedule_type == "polynomial":
-            return self._polynomial_decay(step)
-        elif self.schedule_type == "constant":
-            return self.initial_lr
         else:
-            logger.warning(f"未知的调度类型: {self.schedule_type}，使用常数学习率")
-            return self.initial_lr
+            raise ValueError(f"不支持的学习率调度类型: {schedule_type}")
 
-    def _step_decay(self, step: int) -> float:
+        return schedule
+
+    def get_optimizer(self, opt_name: str) -> Any:
         """
-        阶梯式衰减
-        每隔一定步数，学习率乘以衰减率
+        获取指定的优化器
 
         参数:
-            step: 当前步数
+            opt_name: 优化器名称
 
         返回:
-            学习率
+            优化器实例
         """
-        drop_rate = self.kwargs.get("drop_rate", 0.5)
-        drop_every = self.kwargs.get("drop_every", 1000)
+        if opt_name not in self.optimizers:
+            raise ValueError(f"优化器 '{opt_name}' 不存在")
 
-        drops = step // drop_every
-        return self.initial_lr * (drop_rate ** drops)
+        return self.optimizers[opt_name]
 
-    def _exponential_decay(self, step: int) -> float:
+    def get_learning_rate(self, opt_name: str) -> float:
         """
-        指数衰减
-        学习率按指数函数衰减
+        获取当前学习率
 
         参数:
-            step: 当前步数
+            opt_name: 优化器名称
 
         返回:
-            学习率
+            当前学习率
         """
-        decay_rate = self.kwargs.get("decay_rate", 0.96)
-        decay_steps = self.kwargs.get("decay_steps", 1000)
-        staircase = self.kwargs.get("staircase", False)
+        optimizer = self.get_optimizer(opt_name)
 
-        if staircase:
-            return self.initial_lr * (decay_rate ** (step // decay_steps))
-        else:
-            return self.initial_lr * (decay_rate ** (step / decay_steps))
-
-    def _cosine_decay(self, step: int) -> float:
-        """
-        余弦衰减
-        使用余弦函数平滑衰减学习率
-
-        参数:
-            step: 当前步数
-
-        返回:
-            学习率
-        """
-        import math
-
-        total_steps = self.kwargs.get("total_steps", 10000)
-        min_lr = self.kwargs.get("min_lr", 0.0)
-
-        progress = min(step / total_steps, 1.0)
-        cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
-
-        return min_lr + (self.initial_lr - min_lr) * cosine_decay
-
-    def _warmup_cosine_decay(self, step: int) -> float:
-        """
-        预热 + 余弦衰减
-        前期线性增长，后期余弦衰减
-
-        参数:
-            step: 当前步数
-
-        返回:
-            学习率
-        """
-        import math
-
-        warmup_steps = self.kwargs.get("warmup_steps", 1000)
-        total_steps = self.kwargs.get("total_steps", 10000)
-        min_lr = self.kwargs.get("min_lr", 0.0)
-
-        if step < warmup_steps:
-            # 线性预热
-            return self.initial_lr * (step / warmup_steps)
-        else:
-            # 余弦衰减
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            progress = min(progress, 1.0)
-            cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
-            return min_lr + (self.initial_lr - min_lr) * cosine_decay
-
-    def _polynomial_decay(self, step: int) -> float:
-        """
-        多项式衰减
-        学习率按多项式函数衰减
-
-        参数:
-            step: 当前步数
-
-        返回:
-            学习率
-        """
-        decay_steps = self.kwargs.get("decay_steps", 10000)
-        end_lr = self.kwargs.get("end_lr", 0.0001)
-        power = self.kwargs.get("power", 1.0)
-
-        step = min(step, decay_steps)
-        return (self.initial_lr - end_lr) * ((1 - step / decay_steps) ** power) + end_lr
-
-
-def create_lr_schedule(
-    schedule_type: str,
-    initial_lr: float,
-    **kwargs
-) -> tf.keras.optimizers.schedules.LearningRateSchedule:
-    """
-    创建TensorFlow原生学习率调度器
-
-    参数:
-        schedule_type: 调度类型
-        initial_lr: 初始学习率
-        **kwargs: 其他参数
-
-    返回:
-        学习率调度器
-
-    示例:
-        >>> schedule = create_lr_schedule(
-        >>>     "exponential",
-        >>>     initial_lr=0.001,
-        >>>     decay_steps=1000,
-        >>>     decay_rate=0.96
-        >>> )
-    """
-    if schedule_type == "exponential":
-        return tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=initial_lr,
-            decay_steps=kwargs.get("decay_steps", 1000),
-            decay_rate=kwargs.get("decay_rate", 0.96),
-            staircase=kwargs.get("staircase", False)
-        )
-
-    elif schedule_type == "cosine":
-        return tf.keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=initial_lr,
-            decay_steps=kwargs.get("decay_steps", 10000),
-            alpha=kwargs.get("alpha", 0.0)
-        )
-
-    elif schedule_type == "cosine_restart":
-        return tf.keras.optimizers.schedules.CosineDecayRestarts(
-            initial_learning_rate=initial_lr,
-            first_decay_steps=kwargs.get("first_decay_steps", 1000),
-            t_mul=kwargs.get("t_mul", 2.0),
-            m_mul=kwargs.get("m_mul", 1.0),
-            alpha=kwargs.get("alpha", 0.0)
-        )
-
-    elif schedule_type == "piecewise":
-        return tf.keras.optimizers.schedules.PiecewiseConstantDecay(
-            boundaries=kwargs.get("boundaries", [1000, 5000]),
-            values=kwargs.get("values", [initial_lr, initial_lr * 0.1, initial_lr * 0.01])
-        )
-
-    elif schedule_type == "polynomial":
-        return tf.keras.optimizers.schedules.PolynomialDecay(
-            initial_learning_rate=initial_lr,
-            decay_steps=kwargs.get("decay_steps", 10000),
-            end_learning_rate=kwargs.get("end_learning_rate", 0.0001),
-            power=kwargs.get("power", 1.0)
-        )
-
-    elif schedule_type == "inverse_time":
-        return tf.keras.optimizers.schedules.InverseTimeDecay(
-            initial_learning_rate=initial_lr,
-            decay_steps=kwargs.get("decay_steps", 1000),
-            decay_rate=kwargs.get("decay_rate", 0.5)
-        )
-
-    else:
-        raise ValueError(f"未知的学习率调度类型: {schedule_type}")
-
-
-# ======================================================
-# 优化器工具函数
-# ======================================================
-def get_optimizer_config(optimizer: tf.keras.optimizers.Optimizer) -> Dict:
-    """
-    获取优化器配置
-
-    参数:
-        optimizer: 优化器实例
-
-    返回:
-        配置字典
-
-    示例:
-        >>> config = get_optimizer_config(optimizer)
-        >>> print(config)
-    """
-    return optimizer.get_config()
-
-
-def set_learning_rate(optimizer: tf.keras.optimizers.Optimizer, lr: float) -> None:
-    """
-    设置优化器学习率
-
-    参数:
-        optimizer: 优化器实例
-        lr: 新的学习率
-
-    示例:
-        >>> set_learning_rate(optimizer, 0.0001)
-    """
-    if hasattr(optimizer, 'learning_rate'):
-        if isinstance(optimizer.learning_rate, tf.Variable):
-            optimizer.learning_rate.assign(lr)
-            logger.info(f"学习率更新为: {lr}")
-        else:
-            logger.warning("学习率是调度器，无法直接设置")
-    else:
-        logger.error("优化器没有learning_rate属性")
-
-
-def get_learning_rate(optimizer: tf.keras.optimizers.Optimizer) -> float:
-    """
-    获取当前学习率
-
-    参数:
-        optimizer: 优化器实例
-
-    返回:
-        当前学习率
-
-    示例:
-        >>> lr = get_learning_rate(optimizer)
-        >>> print(f"当前学习率: {lr}")
-    """
-    if hasattr(optimizer, 'learning_rate'):
         lr = optimizer.learning_rate
-        if isinstance(lr, tf.keras.optimizers.schedules.LearningRateSchedule):
-            # 如果是调度器，返回当前步的学习率
-            return float(lr(optimizer.iterations).numpy())
+
+        # 如果是调度器，获取当前值
+        if callable(lr):
+            current_step = optimizer.iterations
+            lr_value = lr(current_step)
         else:
-            return float(lr.numpy())
-    else:
-        logger.error("优化器没有learning_rate属性")
-        return 0.0
+            lr_value = lr
 
+        # 转换为 Python float
+        if hasattr(lr_value, 'numpy'):
+            return float(lr_value.numpy())
+        return float(lr_value)
 
-def apply_gradient_clipping(
-    gradients: list,
-    clip_type: str = "norm",
-    clip_value: float = 1.0
-) -> list:
-    """
-    应用梯度裁剪
+    def set_learning_rate(self, opt_name: str, learning_rate: float):
+        """
+        设置学习率
 
-    参数:
-        gradients: 梯度列表
-        clip_type: 裁剪类型 ("norm" 或 "value")
-        clip_value: 裁剪值
+        参数:
+            opt_name: 优化器名称
+            learning_rate: 新的学习率
+        """
+        optimizer = self.get_optimizer(opt_name)
+        optimizer.learning_rate.assign(learning_rate)
 
-    返回:
-        裁剪后的梯度列表
+    def create_gradient_clip_optimizer(
+        self,
+        base_opt_name: str,
+        clip_norm: Optional[float] = None,
+        clip_value: Optional[float] = None
+    ) -> Any:
+        """
+        创建带梯度裁剪的优化器包装
 
-    示例:
-        >>> clipped_grads = apply_gradient_clipping(gradients, "norm", 1.0)
-    """
-    if clip_type == "norm":
-        # 按范数裁剪
-        clipped_gradients, _ = tf.clip_by_global_norm(gradients, clip_value)
-        return clipped_gradients
-    elif clip_type == "value":
-        # 按值裁剪
-        return [tf.clip_by_value(g, -clip_value, clip_value) for g in gradients]
-    else:
-        logger.warning(f"未知的裁剪类型: {clip_type}，不裁剪")
-        return gradients
+        参数:
+            base_opt_name: 基础优化器名称
+            clip_norm: 梯度范数裁剪阈值
+            clip_value: 梯度值裁剪阈值
 
+        返回:
+            包装后的优化器
+        """
+        if base_opt_name not in self.optimizers:
+            raise ValueError(f"优化器 '{base_opt_name}' 不存在")
 
-def compute_gradient_norm(gradients: list) -> float:
-    """
-    计算梯度的全局范数
+        base_optimizer = self.optimizers[base_opt_name]
 
-    参数:
-        gradients: 梯度列表
+        # 创建包装优化器
+        class GradientClipOptimizer:
+            def __init__(self, optimizer, clip_norm, clip_value):
+                self.optimizer = optimizer
+                self.clip_norm = clip_norm
+                self.clip_value = clip_value
 
-    返回:
-        梯度范数
+            def apply_gradients(self, grads_and_vars):
+                # 提取梯度和变量
+                gradients = [g for g, v in grads_and_vars]
+                variables = [v for g, v in grads_and_vars]
 
-    示例:
-        >>> grad_norm = compute_gradient_norm(gradients)
-        >>> print(f"梯度范数: {grad_norm}")
-    """
-    return float(tf.linalg.global_norm(gradients).numpy())
+                # 裁剪梯度
+                if self.clip_norm is not None:
+                    clipped_grads, _ = call_target(
+                        reflection="tensorflow:clip_by_global_norm",
+                        args={
+                            "t_list": gradients,
+                            "clip_norm": self.clip_norm
+                        }
+                    )
+                elif self.clip_value is not None:
+                    clipped_grads = [
+                        call_target(
+                            reflection="tensorflow:clip_by_value",
+                            args={
+                                "t": g,
+                                "clip_value_min": -self.clip_value,
+                                "clip_value_max": self.clip_value
+                            }
+                        ) if g is not None else None
+                        for g in gradients
+                    ]
+                else:
+                    clipped_grads = gradients
 
+                # 应用梯度
+                return self.optimizer.apply_gradients(
+                    zip(clipped_grads, variables)
+                )
 
-# ======================================================
-# 优化器预设配置
-# ======================================================
-def get_optimizer_preset(preset_name: str, learning_rate: float = 0.001) -> Dict:
-    """
-    获取优化器预设配置
+            def __getattr__(self, name):
+                # 代理其他属性和方法
+                return getattr(self.optimizer, name)
 
-    参数:
-        preset_name: 预设名称 (adam/sgd/rmsprop/adamw/adagrad)
-        learning_rate: 学习率
+        return GradientClipOptimizer(base_optimizer, clip_norm, clip_value)
 
-    返回:
-        优化器配置字典
+    def create_gradient_accumulation_optimizer(
+        self,
+        base_opt_name: str,
+        accumulation_steps: int = 4
+    ) -> Any:
+        """
+        创建梯度累积优化器
 
-    示例:
-        >>> config = get_optimizer_preset("adam", 0.001)
-    """
-    presets = {
-        "adam": {
-            "reflection": "tensorflow.keras.optimizers.Adam",
-            "args": {
-                "learning_rate": learning_rate,
-                "beta_1": 0.9,
-                "beta_2": 0.999,
-                "epsilon": 1e-7
+        参数:
+            base_opt_name: 基础优化器名称
+            accumulation_steps: 累积步数
+
+        返回:
+            梯度累积优化器
+        """
+        if base_opt_name not in self.optimizers:
+            raise ValueError(f"优化器 '{base_opt_name}' 不存在")
+
+        base_optimizer = self.optimizers[base_opt_name]
+
+        # 创建梯度累积优化器
+        class GradientAccumulationOptimizer:
+            def __init__(self, optimizer, accumulation_steps):
+                self.optimizer = optimizer
+                self.accumulation_steps = accumulation_steps
+                self.gradient_accumulations = []
+                self.step_counter = call_target(
+                    reflection="tensorflow:Variable",
+                    args={
+                        "initial_value": 0,
+                        "trainable": False,
+                        "dtype": call_target(
+                            reflection="tensorflow:int32",
+                            args={}
+                        )
+                    }
+                )
+
+            def apply_gradients(self, grads_and_vars):
+                # 累积梯度
+                if not self.gradient_accumulations:
+                    # 第一次，初始化累积器
+                    for g, v in grads_and_vars:
+                        if g is not None:
+                            acc = call_target(
+                                reflection="tensorflow:Variable",
+                                args={
+                                    "initial_value": call_target(
+                                        reflection="tensorflow:zeros_like",
+                                        args={"tensor": g}
+                                    ),
+                                    "trainable": False
+                                }
+                            )
+                        else:
+                            acc = None
+                        self.gradient_accumulations.append(acc)
+
+                # 累加梯度
+                for i, (g, v) in enumerate(grads_and_vars):
+                    if g is not None and self.gradient_accumulations[i] is not None:
+                        self.gradient_accumulations[i].assign_add(g)
+
+                # 增加计数器
+                self.step_counter.assign_add(1)
+
+                # 检查是否需要更新
+                should_update = call_target(
+                    reflection="tensorflow:equal",
+                    args={
+                        "x": call_target(
+                            reflection="tensorflow:math.floormod",
+                            args={
+                                "x": self.step_counter,
+                                "y": self.accumulation_steps
+                            }
+                        ),
+                        "y": 0
+                    }
+                )
+
+                def update_weights():
+                    # 平均梯度
+                    averaged_grads = [
+                        acc / self.accumulation_steps if acc is not None else None
+                        for acc in self.gradient_accumulations
+                    ]
+
+                    # 应用梯度
+                    variables = [v for g, v in grads_and_vars]
+                    result = self.optimizer.apply_gradients(
+                        zip(averaged_grads, variables)
+                    )
+
+                    # 重置累积器
+                    for acc in self.gradient_accumulations:
+                        if acc is not None:
+                            acc.assign(
+                                call_target(
+                                    reflection="tensorflow:zeros_like",
+                                    args={"tensor": acc}
+                                )
+                            )
+
+                    return result
+
+                def no_op():
+                    return call_target(
+                        reflection="tensorflow:no_op",
+                        args={}
+                    )
+
+                return call_target(
+                    reflection="tensorflow:cond",
+                    args={
+                        "pred": should_update,
+                        "true_fn": update_weights,
+                        "false_fn": no_op
+                    }
+                )
+
+            def __getattr__(self, name):
+                return getattr(self.optimizer, name)
+
+        return GradientAccumulationOptimizer(base_optimizer, accumulation_steps)
+
+    def create_multi_optimizer_strategy(
+        self,
+        optimizer_mapping: Dict[str, List[str]]
+    ) -> Dict[str, Any]:
+        """
+        创建多优化器策略（不同参数使用不同优化器）
+
+        参数:
+            optimizer_mapping: 优化器到变量名列表的映射
+                {optimizer_name: [variable_name_pattern, ...]}
+
+        返回:
+            多优化器策略字典
+        """
+        strategy = {}
+
+        for opt_name, var_patterns in optimizer_mapping.items():
+            if opt_name not in self.optimizers:
+                raise ValueError(f"优化器 '{opt_name}' 不存在")
+
+            strategy[opt_name] = {
+                "optimizer": self.optimizers[opt_name],
+                "patterns": var_patterns
             }
-        },
-        "sgd": {
-            "reflection": "tensorflow.keras.optimizers.SGD",
-            "args": {
-                "learning_rate": learning_rate,
-                "momentum": 0.9,
-                "nesterov": True
-            }
-        },
-        "rmsprop": {
-            "reflection": "tensorflow.keras.optimizers.RMSprop",
-            "args": {
-                "learning_rate": learning_rate,
-                "rho": 0.9,
-                "momentum": 0.0,
-                "epsilon": 1e-7
-            }
-        },
-        "adamw": {
-            "reflection": "tensorflow.keras.optimizers.AdamW",
-            "args": {
-                "learning_rate": learning_rate,
-                "weight_decay": 0.01,
-                "beta_1": 0.9,
-                "beta_2": 0.999
-            }
-        },
-        "adagrad": {
-            "reflection": "tensorflow.keras.optimizers.Adagrad",
-            "args": {
-                "learning_rate": learning_rate,
-                "initial_accumulator_value": 0.1,
-                "epsilon": 1e-7
-            }
+
+        return strategy
+
+    def apply_multi_optimizer_gradients(
+        self,
+        strategy: Dict[str, Any],
+        grads_and_vars: List[Tuple[Any, Any]]
+    ):
+        """
+        应用多优化器梯度更新
+
+        参数:
+            strategy: 多优化器策略
+            grads_and_vars: 梯度和变量对列表
+        """
+        # 按优化器分组梯度和变量
+        optimizer_groups = {opt_name: [] for opt_name in strategy.keys()}
+
+        for grad, var in grads_and_vars:
+            if grad is None:
+                continue
+
+            var_name = var.name
+            matched = False
+
+            # 匹配变量到优化器
+            for opt_name, config in strategy.items():
+                for pattern in config["patterns"]:
+                    if pattern in var_name:
+                        optimizer_groups[opt_name].append((grad, var))
+                        matched = True
+                        break
+                if matched:
+                    break
+
+        # 应用各个优化器
+        for opt_name, grads_vars in optimizer_groups.items():
+            if grads_vars:
+                optimizer = strategy[opt_name]["optimizer"]
+                optimizer.apply_gradients(grads_vars)
+
+    def get_optimizer_for_mode(
+        self,
+        training_mode: Optional[str] = None
+    ) -> Any:
+        """
+        根据训练模式获取推荐的优化器
+
+        参数:
+            training_mode: 训练模式（可选）
+
+        返回:
+            优化器实例
+        """
+        mode = training_mode or self.context.training_mode
+
+        # 根据训练模式推荐优化器
+        mode_optimizer_mapping = {
+            "supervised": ["main_optimizer", "adam", "sgd"],
+            "unsupervised": ["adam", "main_optimizer"],
+            "reinforcement": ["policy_optimizer", "value_optimizer", "adam"],
+            "self_supervised": ["adam", "lars", "main_optimizer"],
+            "adversarial": ["generator_optimizer", "discriminator_optimizer"]
         }
-    }
 
-    if preset_name not in presets:
-        raise ValueError(f"未知的预设: {preset_name}，可用: {list(presets.keys())}")
+        # 获取推荐的优化器名称
+        recommended_names = mode_optimizer_mapping.get(mode, ["main_optimizer"])
 
-    return presets[preset_name]
+        # 尝试获取第一个存在的优化器
+        for opt_name in recommended_names:
+            if opt_name in self.optimizers:
+                return self.optimizers[opt_name]
+
+        # 如果没有推荐的，返回第一个可用的
+        if self.optimizers:
+            return list(self.optimizers.values())[0]
+
+        raise ValueError(f"没有为训练模式 '{mode}' 找到合适的优化器")
+
+    def get_optimizer_info(self, opt_name: str) -> Dict[str, Any]:
+        """
+        获取优化器信息
+
+        参数:
+            opt_name: 优化器名称
+
+        返回:
+            优化器信息字典
+        """
+        if opt_name not in self.optimizers:
+            raise ValueError(f"优化器 '{opt_name}' 不存在")
+
+        optimizer = self.optimizers[opt_name]
+
+        info = {
+            "name": opt_name,
+            "type": type(optimizer).__name__,
+            "module": type(optimizer).__module__,
+            "learning_rate": self.get_learning_rate(opt_name)
+        }
+
+        # 尝试获取其他配置参数
+        if hasattr(optimizer, 'beta_1'):
+            info["beta_1"] = float(optimizer.beta_1)
+        if hasattr(optimizer, 'beta_2'):
+            info["beta_2"] = float(optimizer.beta_2)
+        if hasattr(optimizer, 'epsilon'):
+            info["epsilon"] = float(optimizer.epsilon)
+        if hasattr(optimizer, 'momentum'):
+            info["momentum"] = float(optimizer.momentum)
+        if hasattr(optimizer, 'weight_decay'):
+            info["weight_decay"] = float(optimizer.weight_decay)
+
+        # 获取迭代次数
+        if hasattr(optimizer, 'iterations'):
+            info["iterations"] = int(optimizer.iterations.numpy())
+
+        return info
+
+    def create_warmup_schedule(
+        self,
+        initial_lr: float,
+        peak_lr: float,
+        warmup_steps: int,
+        decay_schedule: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """
+        创建学习率预热调度器
+
+        参数:
+            initial_lr: 初始学习率
+            peak_lr: 峰值学习率
+            warmup_steps: 预热步数
+            decay_schedule: 衰减调度配置（可选）
+
+        返回:
+            预热调度器
+        """
+        # 创建预热调度器
+        if decay_schedule is None:
+            # 仅预热，之后保持峰值
+            class WarmupSchedule:
+                def __init__(self, initial_lr, peak_lr, warmup_steps):
+                    self.initial_lr = initial_lr
+                    self.peak_lr = peak_lr
+                    self.warmup_steps = warmup_steps
+
+                def __call__(self, step):
+                    step = call_target(
+                        reflection="tensorflow:cast",
+                        args={"x": step, "dtype": call_target(
+                            reflection="tensorflow:float32", args={}
+                        )}
+                    )
+                    warmup_steps_float = call_target(
+                        reflection="tensorflow:cast",
+                        args={"x": self.warmup_steps, "dtype": call_target(
+                            reflection="tensorflow:float32", args={}
+                        )}
+                    )
+
+                    warmup_lr = self.initial_lr + (
+                        (self.peak_lr - self.initial_lr) *
+                        (step / warmup_steps_float)
+                    )
+
+                    return call_target(
+                        reflection="tensorflow:minimum",
+                        args={"x": warmup_lr, "y": self.peak_lr}
+                    )
+
+            return WarmupSchedule(initial_lr, peak_lr, warmup_steps)
+
+        else:
+            # 预热 + 衰减
+            decay_schedule_obj = self._build_lr_schedule(
+                "warmup_decay",
+                decay_schedule
+            )
+
+            class WarmupDecaySchedule:
+                def __init__(self, initial_lr, peak_lr, warmup_steps, decay_schedule):
+                    self.initial_lr = initial_lr
+                    self.peak_lr = peak_lr
+                    self.warmup_steps = warmup_steps
+                    self.decay_schedule = decay_schedule
+
+                def __call__(self, step):
+                    # 预热阶段
+                    step_float = call_target(
+                        reflection="tensorflow:cast",
+                        args={"x": step, "dtype": call_target(
+                            reflection="tensorflow:float32", args={}
+                        )}
+                    )
+                    warmup_steps_float = call_target(
+                        reflection="tensorflow:cast",
+                        args={"x": self.warmup_steps, "dtype": call_target(
+                            reflection="tensorflow:float32", args={}
+                        )}
+                    )
+
+                    warmup_lr = self.initial_lr + (
+                        (self.peak_lr - self.initial_lr) *
+                        (step_float / warmup_steps_float)
+                    )
+
+                    # 衰减阶段
+                    decay_step = call_target(
+                        reflection="tensorflow:maximum",
+                        args={"x": step - self.warmup_steps, "y": 0}
+                    )
+                    decay_lr = self.decay_schedule(decay_step)
+
+                    # 选择阶段
+                    is_warmup = call_target(
+                        reflection="tensorflow:less",
+                        args={"x": step, "y": self.warmup_steps}
+                    )
+
+                    return call_target(
+                        reflection="tensorflow:cond",
+                        args={
+                            "pred": is_warmup,
+                            "true_fn": lambda: warmup_lr,
+                            "false_fn": lambda: decay_lr
+                        }
+                    )
+
+            return WarmupDecaySchedule(
+                initial_lr, peak_lr, warmup_steps, decay_schedule_obj
+            )
+
+    def validate_optimizer_config(self) -> List[str]:
+        """
+        验证优化器配置
+
+        返回:
+            警告信息列表
+        """
+        warnings = []
+
+        # 检查是否定义了优化器
+        if not self.context.optimizers:
+            warnings.append("未定义任何优化器")
+            return warnings
+
+        # 检查每个优化器的配置
+        for opt_name, opt_config in self.context.optimizers.items():
+            if not opt_config.reflection:
+                warnings.append(f"优化器 '{opt_name}' 缺少 reflection 字段")
+
+            args = opt_config.args
+
+            # 检查学习率
+            if 'learning_rate' not in args:
+                warnings.append(f"优化器 '{opt_name}' 未指定学习率")
+            else:
+                lr = args['learning_rate']
+                if isinstance(lr, (int, float)) and lr <= 0:
+                    warnings.append(
+                        f"优化器 '{opt_name}' 的学习率应大于 0: {lr}"
+                    )
+
+            # 检查 Adam 优化器的参数
+            if 'Adam' in opt_config.reflection:
+                if 'beta_1' in args and not (0 < args['beta_1'] < 1):
+                    warnings.append(
+                        f"优化器 '{opt_name}' 的 beta_1 应在 (0, 1) 范围内"
+                    )
+                if 'beta_2' in args and not (0 < args['beta_2'] < 1):
+                    warnings.append(
+                        f"优化器 '{opt_name}' 的 beta_2 应在 (0, 1) 范围内"
+                    )
+
+        return warnings
+
+
+def build_optimizers_from_context(context: TrainContext) -> Dict[str, Any]:
+    """
+    从训练上下文构建所有优化器的便捷函数
+
+    参数:
+        context: 训练上下文
+
+    返回:
+        优化器字典
+    """
+    builder = OptimizerBuilder(context)
+    return builder.build_all_optimizers()
+
+
+def build_single_optimizer(
+    context: TrainContext,
+    opt_name: str
+) -> Any:
+    """
+    从训练上下文构建单个优化器的便捷函数
+
+    参数:
+        context: 训练上下文
+        opt_name: 优化器名称
+
+    返回:
+        优化器实例
+    """
+    if opt_name not in context.optimizers:
+        raise ValueError(f"优化器 '{opt_name}' 不存在于上下文中")
+
+    builder = OptimizerBuilder(context)
+    opt_config = context.optimizers[opt_name]
+    return builder.build_optimizer(opt_name, opt_config)
+
+
+def create_optimizer_builder(context: TrainContext) -> OptimizerBuilder:
+    """
+    创建并初始化优化器构建器的便捷函数
+
+    参数:
+        context: 训练上下文
+
+    返回:
+        OptimizerBuilder 实例
+    """
+    builder = OptimizerBuilder(context)
+    builder.build_all_optimizers()
+    return builder
