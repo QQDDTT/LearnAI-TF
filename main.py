@@ -36,11 +36,11 @@ def main():
         epilog="""
 示例用法:
   # 仅训练和评估（不部署）
-  python main.py config/game2048_training.yaml
+  python main.py game2048_training.yaml
 
   # 训练、评估并部署模型
-  python main.py config/game2048_training.yaml -d
-  python main.py config/game2048_training.yaml --deployment
+  python main.py game2048_training.yaml -d
+  python main.py game2048_training.yaml --deployment
 
   # 显示帮助信息
   python main.py --help

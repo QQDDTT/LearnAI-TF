@@ -93,6 +93,91 @@ class ComparisonOperator(Enum):
 
 
 # ======================================================
+# 运行时容器中存储的对象类型枚举
+# ======================================================
+class ObjectType(Enum):
+    """
+    运行时容器中存储的对象类型枚举
+    """
+    MODEL = "models"                # 实例化后的模型
+    OPTIMIZER = "optimizers"        # 实例化后的优化器
+    LOSS = "losses"                # 实例化后的损失函数
+    DATALOADER = "dataloaders"      # 数据加载器
+    STEP_RESULT = "step_results"    # 步骤执行结果
+    VARIABLE = "variables"          # 运行时变量 (如 loss, accuracy)
+
+class ContextContainer:
+    """
+    运行时数据容器（注册表）
+
+    用于统一存储和管理所有在训练过程中实例化的
+    “中间产物”，如模型、优化器、变量等。
+    """
+    def __init__(self):
+        # 按类型分类存储所有实例
+        self._registry: Dict[ObjectType, Dict[str, Any]] = {
+            obj_type: {} for obj_type in ObjectType
+        }
+
+    def register(self,
+                 obj_type: ObjectType,
+                 name: str,
+                 instance: Any,
+                 overwrite: bool = False):
+        """
+        注册一个实例到容器中
+
+        参数:
+            obj_type: 对象类型 (ObjectType 枚举)
+            name: 实例的唯一名称 (如 'generator', 'optimizer_A')
+            instance: 要存储的 Python 对象
+            overwrite: 如果同名实例已存在，是否覆盖
+        """
+        if not isinstance(obj_type, ObjectType):
+            raise TypeError(f"obj_type 必须是 ObjectType 枚举，而不是 {type(obj_type)}")
+
+        if name in self._registry[obj_type] and not overwrite:
+            raise ValueError(
+                f"类型为 '{obj_type.value}' 名称为 '{name}' 的对象已存在。"
+                "如需覆盖，请设置 overwrite=True。"
+            )
+
+        self._registry[obj_type][name] = instance
+
+    def get(self, obj_type: ObjectType, name: str) -> Any:
+        """
+        从容器中获取一个实例
+
+        参数:
+            obj_type: 对象类型 (ObjectType 枚举)
+            name: 实例的唯一名称
+
+        返回:
+            存储的 Python 对象
+
+        异常:
+            KeyError: 如果未找到指定名称的对象
+        """
+        if not isinstance(obj_type, ObjectType):
+            raise TypeError(f"obj_type 必须是 ObjectType 枚举，而不是 {type(obj_type)}")
+
+        try:
+            return self._registry[obj_type][name]
+        except KeyError:
+            raise KeyError(
+                f"在容器中未找到类型为 '{obj_type.value}' 名称为 '{name}' 的对象。"
+            )
+
+    def has(self, obj_type: ObjectType, name: str) -> bool:
+        """检查容器中是否存在特定实例"""
+        return name in self._registry[obj_type]
+
+    def get_all(self, obj_type: ObjectType) -> Dict[str, Any]:
+        """获取某一类型的所有实例"""
+        return self._registry[obj_type].copy()
+
+
+# ======================================================
 # Bridge 和 Connection 表达式模式定义（改进版）
 # ======================================================
 
@@ -343,11 +428,7 @@ class TrainContext:
     training_mode: str = "supervised"  # 训练模式: supervised, reinforcement, etc.
 
     # 运行时实例缓存
-    instantiated_models: Dict[str, Any] = field(default_factory=dict)
-    instantiated_optimizers: Dict[str, Any] = field(default_factory=dict)
-    instantiated_losses: Dict[str, Any] = field(default_factory=dict)
-    instantiated_data: Dict[str, Any] = field(default_factory=dict)
-    instantiated_dataloaders: Dict[str, Any] = field(default_factory=dict)
+    container: ContextContainer = field(default_factory=ContextContainer)
 
     # 训练状态
     variables: Dict[str, Any] = field(default_factory=dict)  # 运行时变量
@@ -358,3 +439,5 @@ class TrainContext:
     current_epoch: int = 0
     current_episode: int = 0
     current_step: int = 0
+
+
