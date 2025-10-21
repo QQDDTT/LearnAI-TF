@@ -4,20 +4,23 @@ modules/losses.py
 损失函数管理器：从配置上下文构建和管理损失函数
 
 设计原则：
-1. 支持 TensorFlow 内置损失函数
-2. 支持自定义损失函数
-3. 支持多任务损失组合
-4. 使用 call_target 动态创建
+1. 支持 TensorFlow 内置损失函数（通过 call_target）
+2. 支持自定义损失函数类
+3. 支持多任务学习的损失聚合
+4. 支持损失权重配置
 
 导入限制：
 - 仅导入 common 文件夹内的函数
-- 使用 call_target 调用 TensorFlow API
+- 使用 call_target 调用 TensorFlow 损失函数
 """
 
 from typing import Dict, Any, List, Optional, Callable
-from common.train_context import TrainContext
-from common.common import call_target
+from common.train_context import TrainContext, LossConfig
+from common.common import call_target, LoggerManager
 from common.interfaces import LossManagerInterface
+
+# 初始化日志
+logger = LoggerManager.get_logger(__file__)
 
 
 class LossManager(LossManagerInterface):
@@ -27,275 +30,176 @@ class LossManager(LossManagerInterface):
     职责：
     1. 从 TrainContext.losses 读取配置
     2. 使用 call_target 构建 TensorFlow 损失函数
-    3. 支持多任务损失组合
-    4. 支持加权损失
-
-    支持简化配置：
-    - 所有参数可选（使用默认值）
+    3. 管理自定义损失函数
+    4. 处理多任务损失聚合
     """
 
     def __init__(self, context: TrainContext):
         """初始化损失函数管理器"""
         super().__init__(context)
         self.losses: Dict[str, Any] = {}
-        self.loss_configs: Dict[str, Any] = {}
+        self.loss_configs: Dict[str, LossConfig] = {}
+        self.loss_weights: Dict[str, float] = {}
+        logger.info("LossManager 初始化完成")
 
     def initialize(self) -> None:
         """从 TrainContext 初始化损失函数管理器"""
+        logger.info("开始初始化损失函数管理器")
+
         if not self.context.losses:
+            logger.error("TrainContext 中没有定义任何损失函数")
             raise ValueError("TrainContext 中没有定义任何损失函数")
 
         # 加载损失函数配置
         for loss_name, loss_config in self.context.losses.items():
             self.loss_configs[loss_name] = loss_config
+            logger.debug(f"加载损失函数配置: {loss_name}")
 
+        logger.info(f"找到 {len(self.loss_configs)} 个损失函数配置")
         self._initialized = True
 
     def validate_losses(self) -> bool:
-        """
-        验证损失函数配置
+        """验证损失函数配置"""
+        logger.info("开始验证损失函数配置")
 
-        返回:
-            配置是否有效
-        """
         for loss_name, loss_config in self.loss_configs.items():
-            if not isinstance(loss_config, dict):
+            logger.debug(f"验证损失函数: {loss_name}")
+
+            if not isinstance(loss_config, (dict, LossConfig)):
+                logger.error(f"损失函数 '{loss_name}' 配置格式错误")
                 raise ValueError(f"损失函数 '{loss_name}' 配置格式错误")
 
             # 检查必需字段
-            if 'reflection' not in loss_config:
-                raise ValueError(
-                    f"损失函数 '{loss_name}' 缺少 reflection 字段"
-                )
+            if isinstance(loss_config, dict):
+                if 'reflection' not in loss_config:
+                    logger.error(f"损失函数 '{loss_name}' 缺少 reflection 字段")
+                    raise ValueError(f"损失函数 '{loss_name}' 缺少 reflection 字段")
+            else:
+                if not loss_config.reflection:
+                    logger.error(f"损失函数 '{loss_name}' 缺少 reflection 字段")
+                    raise ValueError(f"损失函数 '{loss_name}' 缺少 reflection 字段")
 
+        logger.info("损失函数配置验证通过")
         return True
-
-    # ========================================================================
-    # 损失函数构建
-    # ========================================================================
 
     def build_loss(
         self,
         loss_name: str,
         loss_config: Any
     ) -> Any:
-        """
-        构建单个损失函数
+        """构建单个损失函数"""
+        logger.info(f"开始构建损失函数: {loss_name}")
 
-        参数:
-            loss_name: 损失函数名称
-            loss_config: 损失函数配置
-
-        返回:
-            损失函数实例
-        """
         # 转换为字典格式
-        if not isinstance(loss_config, dict):
+        if isinstance(loss_config, LossConfig):
             config = {
-                'reflection': getattr(loss_config, 'reflection', ''),
-                'args': getattr(loss_config, 'args', {})
+                'reflection': loss_config.reflection,
+                'args': loss_config.args,
+                'weight': getattr(loss_config, 'weight', 1.0)
             }
         else:
             config = loss_config
 
         reflection = config.get('reflection')
         args = config.get('args', {}).copy()
+        weight = config.get('weight', 1.0)
 
         if not reflection:
+            logger.error(f"损失函数 '{loss_name}' 缺少 reflection")
             raise ValueError(f"损失函数 '{loss_name}' 缺少 reflection")
 
-        # 添加名称（如果损失函数支持）
-        if 'name' not in args and self._supports_name_param(reflection):
-            args['name'] = loss_name
+        logger.debug(f"损失函数类型: {reflection}")
+        logger.debug(f"损失权重: {weight}")
 
         # 创建损失函数
-        loss = call_target(reflection=reflection, args=args)
+        loss_fn = call_target(reflection=reflection, args=args)
 
-        return loss
+        # 保存权重
+        self.loss_weights[loss_name] = weight
 
-    def _supports_name_param(self, reflection: str) -> bool:
-        """
-        检查损失函数是否支持 name 参数
-
-        参数:
-            reflection: 反射路径
-
-        返回:
-            是否支持
-        """
-        # TensorFlow 内置损失函数通常支持 name 参数
-        if 'tensorflow.keras.losses' in reflection:
-            return True
-
-        return False
+        logger.info(f"损失函数 '{loss_name}' 构建完成")
+        return loss_fn
 
     def build_all_losses(self) -> Dict[str, Any]:
-        """
-        构建所有损失函数
+        """构建所有损失函数"""
+        logger.info("开始构建所有损失函数")
 
-        返回:
-            损失函数字典 {loss_name: loss}
-        """
         for loss_name, loss_config in self.loss_configs.items():
             try:
-                loss = self.build_loss(loss_name, loss_config)
-                self.losses[loss_name] = loss
+                loss_fn = self.build_loss(loss_name, loss_config)
+                self.losses[loss_name] = loss_fn
+                logger.info(f"✓ 损失函数 '{loss_name}' 构建成功")
             except Exception as e:
-                raise RuntimeError(
-                    f"构建损失函数 '{loss_name}' 失败: {e}"
-                ) from e
+                logger.error(f"✗ 构建损失函数 '{loss_name}' 失败: {e}", exc_info=True)
+                raise RuntimeError(f"构建损失函数 '{loss_name}' 失败: {e}") from e
 
+        logger.info(f"所有损失函数构建完成，共 {len(self.losses)} 个")
         return self.losses
 
-    # ========================================================================
-    # 多任务损失组合
-    # ========================================================================
-
-    def setup_aggregators(self) -> Dict[str, Any]:
-        """
-        设置多任务损失聚合器（可选）
-
-        返回:
-            聚合器字典
-        """
-        # 可以在这里设置预定义的损失聚合器
-        return {}
-
-    def create_weighted_loss(
+    def create_combined_loss(
         self,
         loss_names: List[str],
         weights: Optional[List[float]] = None
     ) -> Callable:
-        """
-        创建加权组合损失
+        """创建组合损失函数"""
+        logger.info(f"创建组合损失函数，包含 {len(loss_names)} 个损失")
 
-        参数:
-            loss_names: 损失函数名称列表
-            weights: 权重列表（可选，默认均等权重）
-
-        返回:
-            组合损失函数
-        """
         if not loss_names:
+            logger.error("loss_names 不能为空")
             raise ValueError("loss_names 不能为空")
 
         # 获取所有损失函数
         loss_instances = []
         for loss_name in loss_names:
             if loss_name not in self.losses:
+                logger.error(f"损失函数 '{loss_name}' 不存在")
                 raise ValueError(f"损失函数 '{loss_name}' 不存在")
             loss_instances.append(self.losses[loss_name])
+            logger.debug(f"添加损失组件: {loss_name}")
 
         # 设置权重
         if weights is None:
             weights = [1.0] * len(loss_names)
-        elif len(weights) != len(loss_names):
-            raise ValueError(
-                f"weights 长度与 loss_names 长度不匹配"
-            )
+            logger.debug("使用默认权重 (均等)")
+        else:
+            logger.debug(f"使用自定义权重: {weights}")
 
-        # 创建组合损失函数
         def combined_loss(y_true, y_pred):
+            """组合损失函数"""
             total_loss = 0.0
             for loss_fn, weight in zip(loss_instances, weights):
                 loss_value = loss_fn(y_true, y_pred)
                 total_loss += weight * loss_value
             return total_loss
 
+        logger.info("组合损失函数创建完成")
         return combined_loss
-
-    def create_multi_output_loss(
-        self,
-        output_losses: Dict[str, str],
-        output_weights: Optional[Dict[str, float]] = None
-    ) -> Callable:
-        """
-        创建多输出损失函数
-
-        参数:
-            output_losses: 输出到损失的映射 {output_name: loss_name}
-            output_weights: 输出权重映射（可选）
-
-        返回:
-            多输出损失函数
-        """
-        if not output_losses:
-            raise ValueError("output_losses 不能为空")
-
-        # 获取所有损失函数
-        loss_mapping = {}
-        for output_name, loss_name in output_losses.items():
-            if loss_name not in self.losses:
-                raise ValueError(f"损失函数 '{loss_name}' 不存在")
-            loss_mapping[output_name] = self.losses[loss_name]
-
-        # 设置权重
-        if output_weights is None:
-            output_weights = {name: 1.0 for name in output_losses.keys()}
-
-        # 创建多输出损失函数
-        def multi_output_loss(y_true, y_pred):
-            """
-            y_true: 字典 {output_name: true_values} 或元组
-            y_pred: 字典 {output_name: pred_values} 或元组
-            """
-            total_loss = 0.0
-
-            # 如果是字典格式
-            if isinstance(y_true, dict) and isinstance(y_pred, dict):
-                for output_name, loss_fn in loss_mapping.items():
-                    if output_name not in y_true or output_name not in y_pred:
-                        raise ValueError(f"输出 '{output_name}' 不存在")
-
-                    loss_value = loss_fn(y_true[output_name], y_pred[output_name])
-                    weight = output_weights.get(output_name, 1.0)
-                    total_loss += weight * loss_value
-
-            # 如果是元组格式
-            elif isinstance(y_true, (list, tuple)) and isinstance(y_pred, (list, tuple)):
-                output_names = list(output_losses.keys())
-                for i, output_name in enumerate(output_names):
-                    loss_fn = loss_mapping[output_name]
-                    loss_value = loss_fn(y_true[i], y_pred[i])
-                    weight = output_weights.get(output_name, 1.0)
-                    total_loss += weight * loss_value
-
-            else:
-                raise ValueError("y_true 和 y_pred 格式不支持")
-
-            return total_loss
-
-        return multi_output_loss
-
-    # ========================================================================
-    # 接口实现
-    # ========================================================================
 
     def execute(self) -> Dict[str, Any]:
         """执行损失函数构建"""
+        logger.info("执行损失函数构建流程")
         return self.build_all_losses()
 
     def finalize(self) -> None:
         """将损失函数缓存到上下文"""
+        logger.info("将损失函数保存到上下文")
         self.context.container.losses = self.losses
 
-    # ========================================================================
-    # 工具方法
-    # ========================================================================
+        if self.loss_weights:
+            if not hasattr(self.context.container, 'loss_weights'):
+                self.context.container.loss_weights = {}
+            self.context.container.loss_weights.update(self.loss_weights)
+            logger.debug(f"已保存 {len(self.loss_weights)} 个损失权重")
+
+        logger.debug(f"已保存 {len(self.losses)} 个损失函数到上下文")
 
     def get_loss(self, loss_name: str) -> Any:
-        """
-        获取损失函数实例
-
-        参数:
-            loss_name: 损失函数名称
-
-        返回:
-            损失函数实例
-        """
+        """获取损失函数实例"""
         if loss_name not in self.losses:
+            logger.error(f"损失函数 '{loss_name}' 不存在")
             raise ValueError(f"损失函数 '{loss_name}' 不存在")
 
+        logger.debug(f"获取损失函数: {loss_name}")
         return self.losses[loss_name]
 
     def compute_loss(
@@ -305,18 +209,8 @@ class LossManager(LossManagerInterface):
         y_pred: Any,
         sample_weight: Optional[Any] = None
     ) -> Any:
-        """
-        计算损失值
-
-        参数:
-            loss_name: 损失函数名称
-            y_true: 真实值
-            y_pred: 预测值
-            sample_weight: 样本权重（可选）
-
-        返回:
-            损失值
-        """
+        """计算损失值"""
+        logger.debug(f"计算损失: {loss_name}")
         loss_fn = self.get_loss(loss_name)
 
         if sample_weight is not None:
@@ -332,12 +226,8 @@ class LossManager(LossManagerInterface):
         return loss_value
 
     def get_all_loss_info(self) -> Dict[str, Dict[str, Any]]:
-        """
-        获取所有损失函数信息
-
-        返回:
-            损失函数信息字典
-        """
+        """获取所有损失函数信息"""
+        logger.debug("获取所有损失函数信息")
         info = {}
 
         for loss_name in self.losses.keys():
@@ -345,75 +235,25 @@ class LossManager(LossManagerInterface):
             info[loss_name] = {
                 'name': loss_name,
                 'class': type(loss_fn).__name__,
-                'module': type(loss_fn).__module__
+                'module': type(loss_fn).__module__,
+                'weight': self.loss_weights.get(loss_name, 1.0)
             }
 
         return info
 
 
-# ============================================================================
 # 便捷函数
-# ============================================================================
-
 def build_losses_from_context(context: TrainContext) -> Dict[str, Any]:
-    """
-    从训练上下文构建所有损失函数的便捷函数
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        损失函数字典
-    """
+    """从训练上下文构建所有损失函数的便捷函数"""
+    logger.info("使用便捷函数构建损失函数")
     manager = LossManager(context)
     return manager.run()
 
 
-def get_loss_from_context(
-    context: TrainContext,
-    loss_name: str
-) -> Any:
-    """
-    从上下文获取单个损失函数
-
-    参数:
-        context: 训练上下文
-        loss_name: 损失函数名称
-
-    返回:
-        损失函数实例
-    """
-    manager = LossManager(context)
-    manager.run()
-    return manager.get_loss(loss_name)
-
-
-def create_loss_manager(context: TrainContext) -> LossManager:
-    """
-    创建并初始化损失函数管理器
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        LossManager 实例
-    """
-    manager = LossManager(context)
-    manager.run()
-    return manager
-
-
 def create_simple_loss(loss_type: str = 'mse', **kwargs) -> Any:
-    """
-    快速创建损失函数的便捷函数
+    """快速创建损失函数的便捷函数"""
+    logger.info(f"创建简单损失函数: {loss_type}")
 
-    参数:
-        loss_type: 损失函数类型
-        **kwargs: 其他参数
-
-    返回:
-        损失函数实例
-    """
     loss_map = {
         'mse': 'tensorflow.keras.losses:MeanSquaredError',
         'mae': 'tensorflow.keras.losses:MeanAbsoluteError',
@@ -427,10 +267,8 @@ def create_simple_loss(loss_type: str = 'mse', **kwargs) -> Any:
     }
 
     if loss_type.lower() not in loss_map:
-        raise ValueError(
-            f"不支持的损失函数类型: {loss_type}。"
-            f"支持的类型: {list(loss_map.keys())}"
-        )
+        logger.error(f"不支持的损失函数类型: {loss_type}")
+        raise ValueError(f"不支持的损失函数类型: {loss_type}")
 
     reflection = loss_map[loss_type.lower()]
     return call_target(reflection=reflection, args=kwargs)

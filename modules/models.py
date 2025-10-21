@@ -16,8 +16,11 @@ modules/models.py
 
 from typing import Dict, Any, List, Optional
 from common.train_context import TrainContext
-from common.common import call_target
+from common.common import call_target, LoggerManager
 from common.interfaces import ModelBuilderInterface
+
+# 初始化日志
+logger = LoggerManager.get_logger(__file__)
 
 
 class ModelBuilder(ModelBuilderInterface):
@@ -42,11 +45,15 @@ class ModelBuilder(ModelBuilderInterface):
         self.models: Dict[str, Any] = {}
         self.layer_cache: Dict[str, Any] = {}
         self.layer_outputs: Dict[str, Any] = {}
+        logger.info("ModelBuilder 初始化完成")
 
     def initialize(self) -> None:
         """从 TrainContext 初始化模型构建器"""
+        logger.info("开始初始化模型构建器")
         if not self.context.models:
+            logger.error("TrainContext 中没有定义任何模型")
             raise ValueError("TrainContext 中没有定义任何模型")
+        logger.info(f"找到 {len(self.context.models)} 个模型配置")
         self._initialized = True
 
     def validate_models(self) -> bool:
@@ -56,30 +63,40 @@ class ModelBuilder(ModelBuilderInterface):
         返回:
             配置是否有效
         """
+        logger.info("开始验证模型配置")
         for model_name, model_config in self.context.models.items():
+            logger.debug(f"验证模型: {model_name}")
+
             if not isinstance(model_config, dict):
+                logger.error(f"模型 '{model_name}' 配置格式错误")
                 raise ValueError(f"模型 '{model_name}' 配置格式错误")
 
             # 检查必需字段
             if 'type' not in model_config:
+                logger.error(f"模型 '{model_name}' 缺少 type 字段")
                 raise ValueError(f"模型 '{model_name}' 缺少 type 字段")
 
             model_type = model_config['type']
+            logger.debug(f"模型 '{model_name}' 类型: {model_type}")
 
             # Sequential 和 Functional 需要 layers
             if model_type in ['sequential', 'functional']:
                 if 'layers' not in model_config or not model_config['layers']:
+                    logger.error(f"模型 '{model_name}' (type={model_type}) 必须定义 layers")
                     raise ValueError(
                         f"模型 '{model_name}' (type={model_type}) 必须定义 layers"
                     )
+                logger.debug(f"模型 '{model_name}' 包含 {len(model_config['layers'])} 层")
 
             # Subclass 需要 reflection
             if model_type == 'subclass':
                 if 'reflection' not in model_config:
+                    logger.error(f"模型 '{model_name}' (type=subclass) 必须定义 reflection")
                     raise ValueError(
                         f"模型 '{model_name}' (type=subclass) 必须定义 reflection"
                     )
 
+        logger.info("模型配置验证通过")
         return True
 
     def build_model(
@@ -97,6 +114,8 @@ class ModelBuilder(ModelBuilderInterface):
         返回:
             Keras 模型实例
         """
+        logger.info(f"开始构建模型: {model_name}")
+
         # 转换为字典格式
         if not isinstance(model_config, dict):
             config = {
@@ -108,225 +127,96 @@ class ModelBuilder(ModelBuilderInterface):
         else:
             config = model_config
 
-        model_type = config['type']
+        model_type = config.get('type', 'sequential').lower()
+        logger.debug(f"模型类型: {model_type}")
 
-        # 清空缓存
-        self.layer_cache = {}
-        self.layer_outputs = {}
-
-        # 根据类型构建
+        # 根据类型构建模型
         if model_type == 'sequential':
-            return self._build_sequential_model(model_name, config)
+            model = self._build_sequential_model(model_name, config)
         elif model_type == 'functional':
-            return self._build_functional_model(model_name, config)
+            model = self._build_functional_model(model_name, config)
         elif model_type == 'subclass':
-            return self._build_subclass_model(model_name, config)
+            model = self._build_subclass_model(model_name, config)
         else:
+            logger.error(f"不支持的模型类型: {model_type}")
             raise ValueError(f"不支持的模型类型: {model_type}")
 
-    #=========================================================================
-    # Sequential 模型构建
-    #=========================================================================
+        logger.info(f"模型 '{model_name}' 构建完成")
+        return model
 
     def _build_sequential_model(
         self,
         model_name: str,
         config: Dict[str, Any]
     ) -> Any:
-        """
-        构建顺序模型
+        """构建顺序模型"""
+        logger.debug(f"构建顺序模型: {model_name}")
 
-        参数:
-            model_name: 模型名称
-            config: 模型配置
-
-        返回:
-            Sequential 模型
-        """
         layers_config = config.get('layers', [])
+        logger.debug(f"包含 {len(layers_config)} 层")
 
-        if not layers_config:
-            raise ValueError(f"Sequential 模型 '{model_name}' 没有定义层")
-
-        # 检查是否有非顺序连接
-        for i, layer_config in enumerate(layers_config):
-            connection = layer_config.get('connection')
-            if connection and connection not in [None, '@sequential', '']:
-                raise ValueError(
-                    f"Sequential 模型不支持非顺序连接: {connection}。"
-                    f"请使用 Functional 模型"
-                )
-
-        # 构建层列表
         layers = []
         for i, layer_config in enumerate(layers_config):
-            layer_name = layer_config.get('name', f"{model_name}_layer_{i}")
+            layer_name = layer_config.get('name', f'{model_name}_layer_{i}')
+            logger.debug(f"构建层 {i+1}/{len(layers_config)}: {layer_name}")
             layer = self._build_layer(layer_config, layer_name)
             layers.append(layer)
 
         # 创建 Sequential 模型
         model = call_target(
             reflection="tensorflow.keras:Sequential",
-            args={
-                "layers": layers,
-                "name": model_name
-            }
+            args={'layers': layers, 'name': model_name}
         )
 
+        logger.info(f"Sequential 模型 '{model_name}' 构建完成，共 {len(layers)} 层")
         return model
 
-    #=========================================================================
-    # Functional 模型构建
-    #=========================================================================
-
-    def _build_functional_model(
-        self,
-        model_name: str,
-        config: Dict[str, Any]
-    ) -> Any:
+    def build_all_models(self) -> Dict[str, Any]:
         """
-        构建函数式模型
-
-        参数:
-            model_name: 模型名称
-            config: 模型配置
+        构建所有模型
 
         返回:
-            Functional 模型
+            模型字典 {model_name: model}
         """
-        layers_config = config.get('layers', [])
+        logger.info("开始构建所有模型")
 
-        if not layers_config:
-            raise ValueError(f"Functional 模型 '{model_name}' 没有定义层")
+        for model_name, model_config in self.context.models.items():
+            try:
+                model = self.build_model(model_name, model_config)
+                self.models[model_name] = model
+                logger.info(f"✓ 模型 '{model_name}' 构建成功")
+            except Exception as e:
+                logger.error(f"✗ 构建模型 '{model_name}' 失败: {e}", exc_info=True)
+                raise RuntimeError(
+                    f"构建模型 '{model_name}' 失败: {e}"
+                ) from e
 
-        # 找到输入层
-        input_layers = [
-            (i, layer) for i, layer in enumerate(layers_config)
-            if layer.get('is_input', False)
-        ]
+        logger.info(f"所有模型构建完成，共 {len(self.models)} 个")
+        return self.models
 
-        if not input_layers:
-            # 如果没有明确标记，第一层默认为输入
-            input_layers = [(0, layers_config[0])]
+    def execute(self) -> Dict[str, Any]:
+        """执行模型构建"""
+        logger.info("执行模型构建流程")
+        models = self.build_all_models()
+        self.compile_models()
+        return models
 
-        # 找到输出层
-        output_layers = [
-            (i, layer) for i, layer in enumerate(layers_config)
-            if layer.get('is_output', False)
-        ]
-
-        if not output_layers:
-            # 如果没有明确标记，最后一层默认为输出
-            output_layers = [(len(layers_config) - 1, layers_config[-1])]
-
-        # 构建输入
-        inputs = []
-        for i, layer_config in input_layers:
-            input_tensor = self._build_input_layer(layer_config, i)
-            layer_name = layer_config.get('name', f'input_{i}')
-            self.layer_outputs[layer_name] = input_tensor
-            inputs.append(input_tensor)
-
-        # 构建所有非输入层并连接
-        for i, layer_config in enumerate(layers_config):
-            if layer_config.get('is_input', i == 0 and len(input_layers) == 1):
-                continue
-
-            layer_name = layer_config.get('name', f'layer_{i}')
-            self._build_and_connect_layer(layer_config, layer_name)
-
-        # 收集输出
-        outputs = []
-        for i, layer_config in output_layers:
-            layer_name = layer_config.get('name', f'layer_{i}')
-            if layer_name not in self.layer_outputs:
-                raise ValueError(f"输出层 '{layer_name}' 没有被连接")
-            outputs.append(self.layer_outputs[layer_name])
-
-        # 简化单输入/输出
-        if len(inputs) == 1:
-            inputs = inputs[0]
-        if len(outputs) == 1:
-            outputs = outputs[0]
-
-        # 创建模型
-        model = call_target(
-            reflection="tensorflow.keras:Model",
-            args={
-                "inputs": inputs,
-                "outputs": outputs,
-                "name": model_name
-            }
-        )
-
-        return model
-
-    #=========================================================================
-    # Subclass 模型构建
-    #=========================================================================
-
-    def _build_subclass_model(
-        self,
-        model_name: str,
-        config: Dict[str, Any]
-    ) -> Any:
-        """
-        构建子类模型
-
-        参数:
-            model_name: 模型名称
-            config: 模型配置
-
-        返回:
-            Model 子类实例
-        """
-        reflection = config.get('reflection')
-
-        if not reflection:
-            raise ValueError(f"Subclass 模型 '{model_name}' 必须指定 reflection")
-
-        # 准备参数
-        args = config.get('args', {}).copy()
-        args['name'] = model_name
-
-        # 如果定义了 layers，构建并传递
-        layers_config = config.get('layers', [])
-        if layers_config:
-            built_layers = []
-            for i, layer_config in enumerate(layers_config):
-                layer_name = layer_config.get('name', f'{model_name}_layer_{i}')
-                layer = self._build_layer(layer_config, layer_name)
-                built_layers.append(layer)
-
-            args['layers'] = built_layers
-
-        # 实例化模型
-        model = call_target(reflection=reflection, args=args)
-
-        return model
-
-    #=========================================================================
-    # 层构建
-    #=========================================================================
+    def finalize(self) -> None:
+        """将模型缓存到上下文"""
+        logger.info("将模型保存到上下文")
+        self.context.container.models = self.models
+        logger.debug(f"已保存 {len(self.models)} 个模型到上下文")
 
     def _build_layer(
         self,
         layer_config: Dict[str, Any],
         layer_name: str
     ) -> Any:
-        """
-        构建单个层
-
-        参数:
-            layer_config: 层配置
-            layer_name: 层名称
-
-        返回:
-            Keras 层实例
-        """
+        """构建单个层"""
         reflection = layer_config.get('reflection')
 
         if not reflection:
+            logger.error(f"层 '{layer_name}' 缺少 reflection 字段")
             raise ValueError(f"层 '{layer_name}' 缺少 reflection 字段")
 
         # 准备参数
@@ -336,6 +226,8 @@ class ModelBuilder(ModelBuilderInterface):
         if 'name' not in args:
             args['name'] = layer_name
 
+        logger.debug(f"创建层: {layer_name} ({reflection})")
+
         # 创建层
         layer = call_target(reflection=reflection, args=args)
 
@@ -344,290 +236,21 @@ class ModelBuilder(ModelBuilderInterface):
 
         return layer
 
-    def _build_input_layer(
-        self,
-        layer_config: Dict[str, Any],
-        index: int
-    ) -> Any:
-        """
-        构建输入层
-
-        参数:
-            layer_config: 层配置
-            index: 索引
-
-        返回:
-            输入张量
-        """
-        args = layer_config.get('args', {}).copy()
-        layer_name = layer_config.get('name', f'input_{index}')
-
-        if 'name' not in args:
-            args['name'] = layer_name
-
-        # 输入层必须有 shape
-        if 'shape' not in args:
-            raise ValueError(f"输入层 '{layer_name}' 必须指定 shape")
-
-        # 创建输入张量
-        input_tensor = call_target(
-            reflection="tensorflow.keras:Input",
-            args=args
-        )
-
-        return input_tensor
-
-    #=========================================================================
-    # 层连接
-    #=========================================================================
-
-    def _build_and_connect_layer(
-        self,
-        layer_config: Dict[str, Any],
-        layer_name: str
-    ) -> None:
-        """
-        构建层并根据 connection 连接
-
-        参数:
-            layer_config: 层配置
-            layer_name: 层名称
-        """
-        # 构建层
-        layer = self._build_layer(layer_config, layer_name)
-
-        # 解析连接
-        connection_str = layer_config.get('connection', '@sequential')
-
-        # 如果为空，使用顺序连接
-        if not connection_str or connection_str.strip() == '':
-            connection_str = '@sequential'
-
-        # 根据连接类型处理
-        output = self._process_connection(layer, connection_str, layer_name)
-
-        # 缓存输出
-        self.layer_outputs[layer_name] = output
-
-    def _process_connection(
-        self,
-        layer: Any,
-        connection_str: str,
-        layer_name: str
-    ) -> Any:
-        """
-        处理层连接
-
-        参数:
-            layer: 层实例
-            connection_str: 连接字符串
-            layer_name: 层名称
-
-        返回:
-            层输出
-        """
-        # 解析连接类型和目标
-        if connection_str.startswith('@sequential'):
-            return self._connect_sequential(layer, layer_name)
-
-        elif connection_str.startswith('@skip:'):
-            target = connection_str.split(':', 1)[1]
-            return self._connect_skip(layer, target, layer_name)
-
-        elif connection_str.startswith('@residual:'):
-            target = connection_str.split(':', 1)[1]
-            return self._connect_residual(layer, target, layer_name)
-
-        elif connection_str.startswith('@concat:'):
-            targets = connection_str.split(':', 1)[1]
-            target_list = [t.strip() for t in targets.strip('[]').split(',')]
-            return self._connect_concat(layer, target_list, layer_name)
-
-        elif connection_str.startswith('@add:'):
-            targets = connection_str.split(':', 1)[1]
-            target_list = [t.strip() for t in targets.strip('[]').split(',')]
-            return self._connect_add(layer, target_list, layer_name)
-
-        else:
-            # 默认顺序连接
-            return self._connect_sequential(layer, layer_name)
-
-    def _connect_sequential(self, layer: Any, layer_name: str) -> Any:
-        """顺序连接"""
-        if not self.layer_outputs:
-            raise ValueError(
-                f"层 '{layer_name}' 使用顺序连接，但没有前置层"
-            )
-
-        # 获取最后一个输出
-        last_output = list(self.layer_outputs.values())[-1]
-        return layer(last_output)
-
-    def _connect_skip(self, layer: Any, target: str, layer_name: str) -> Any:
-        """跳跃连接"""
-        if target not in self.layer_outputs:
-            raise ValueError(
-                f"层 '{layer_name}' 的跳跃连接目标 '{target}' 不存在"
-            )
-
-        target_output = self.layer_outputs[target]
-        return layer(target_output)
-
-    def _connect_residual(self, layer: Any, target: str, layer_name: str) -> Any:
-        """残差连接: x + F(x)"""
-        if target not in self.layer_outputs:
-            raise ValueError(
-                f"层 '{layer_name}' 的残差连接目标 '{target}' 不存在"
-            )
-
-        x = self.layer_outputs[target]
-        fx = layer(x)
-
-        # 残差相加
-        add_layer = call_target(
-            reflection="tensorflow.keras.layers:Add",
-            args={}
-        )
-        output = add_layer([x, fx])
-
-        return output
-
-    def _connect_concat(
-        self,
-        layer: Any,
-        targets: List[str],
-        layer_name: str
-    ) -> Any:
-        """拼接连接"""
-        if len(targets) < 2:
-            raise ValueError(
-                f"层 '{layer_name}' 的拼接连接需要至少2个目标层"
-            )
-
-        # 收集输入
-        inputs = []
-        for target in targets:
-            if target not in self.layer_outputs:
-                raise ValueError(f"目标层 '{target}' 不存在")
-            inputs.append(self.layer_outputs[target])
-
-        # 拼接
-        concat_layer = call_target(
-            reflection="tensorflow.keras.layers:Concatenate",
-            args={"axis": -1}
-        )
-        concatenated = concat_layer(inputs)
-
-        # 应用当前层
-        return layer(concatenated)
-
-    def _connect_add(
-        self,
-        layer: Any,
-        targets: List[str],
-        layer_name: str
-    ) -> Any:
-        """相加连接"""
-        if len(targets) < 2:
-            raise ValueError(
-                f"层 '{layer_name}' 的相加连接需要至少2个目标层"
-            )
-
-        # 收集输入
-        inputs = []
-        for target in targets:
-            if target not in self.layer_outputs:
-                raise ValueError(f"目标层 '{target}' 不存在")
-            inputs.append(self.layer_outputs[target])
-
-        # 相加
-        add_layer = call_target(
-            reflection="tensorflow.keras.layers:Add",
-            args={}
-        )
-        added = add_layer(inputs)
-
-        # 应用当前层
-        return layer(added)
-
-    #=========================================================================
-    # 接口实现
-    #=========================================================================
-
-    def build_all_models(self) -> Dict[str, Any]:
-        """
-        构建所有模型
-
-        返回:
-            模型字典 {model_name: model}
-        """
-        for model_name, model_config in self.context.models.items():
-            try:
-                model = self.build_model(model_name, model_config)
-                self.models[model_name] = model
-            except Exception as e:
-                raise RuntimeError(
-                    f"构建模型 '{model_name}' 失败: {e}"
-                ) from e
-
-        return self.models
-
     def compile_models(self) -> None:
         """编译模型（可选）"""
+        logger.debug("检查是否需要编译模型")
         # 如果有编译配置，执行编译
         # 否则跳过（使用自定义训练循环）
         pass
 
-    def execute(self) -> Dict[str, Any]:
-        """执行模型构建"""
-        models = self.build_all_models()
-        self.compile_models()
-        return models
-
-    def finalize(self) -> None:
-        """将模型缓存到上下文"""
-        self.context.container.models = self.models
-
-    #=========================================================================
-    # 工具方法
-    #=========================================================================
-
     def get_model(self, model_name: str) -> Any:
-        """
-        获取模型实例
-
-        参数:
-            model_name: 模型名称
-
-        返回:
-            模型实例
-        """
+        """获取模型实例"""
         if model_name not in self.models:
+            logger.error(f"模型 '{model_name}' 不存在")
             raise ValueError(f"模型 '{model_name}' 不存在")
 
+        logger.debug(f"获取模型: {model_name}")
         return self.models[model_name]
-
-    def get_model_summary(self, model_name: str) -> str:
-        """
-        获取模型摘要
-
-        参数:
-            model_name: 模型名称
-
-        返回:
-            模型摘要字符串
-        """
-        model = self.get_model(model_name)
-
-        # 捕获 summary 输出
-        import io
-        import contextlib
-
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            model.summary()
-
-        return buffer.getvalue()
 
     def save_model(
         self,
@@ -635,91 +258,16 @@ class ModelBuilder(ModelBuilderInterface):
         filepath: str,
         save_format: str = 'tf'
     ) -> None:
-        """
-        保存模型
-
-        参数:
-            model_name: 模型名称
-            filepath: 保存路径
-            save_format: 保存格式 (tf/h5/keras)
-        """
+        """保存模型"""
+        logger.info(f"保存模型 '{model_name}' 到 {filepath}")
         model = self.get_model(model_name)
         model.save(filepath, save_format=save_format)
-
-    def load_model(
-        self,
-        model_name: str,
-        filepath: str
-    ) -> Any:
-        """
-        加载模型
-
-        参数:
-            model_name: 模型名称
-            filepath: 模型路径
-
-        返回:
-            加载的模型
-        """
-        model = call_target(
-            reflection="tensorflow.keras.models:load_model",
-            args={'filepath': filepath}
-        )
-
-        self.models[model_name] = model
-        return model
+        logger.info(f"模型保存成功: {filepath}")
 
 
-#=============================================================================
 # 便捷函数
-#=============================================================================
-
 def build_models_from_context(context: TrainContext) -> Dict[str, Any]:
-    """
-    从训练上下文构建所有模型的便捷函数
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        模型字典
-    """
+    """从训练上下文构建所有模型的便捷函数"""
+    logger.info("使用便捷函数构建模型")
     builder = ModelBuilder(context)
     return builder.run()
-
-
-def build_single_model(
-    context: TrainContext,
-    model_name: str
-) -> Any:
-    """
-    从上下文构建单个模型
-
-    参数:
-        context: 训练上下文
-        model_name: 模型名称
-
-    返回:
-        模型实例
-    """
-    if model_name not in context.models:
-        raise ValueError(f"模型 '{model_name}' 不存在于上下文中")
-
-    builder = ModelBuilder(context)
-    builder.run()
-    return builder.get_model(model_name)
-
-
-def create_model_builder(context: TrainContext) -> ModelBuilder:
-    """
-    创建并初始化模型构建器
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        ModelBuilder 实例
-    """
-    builder = ModelBuilder(context)
-    builder.run()
-    return builder
