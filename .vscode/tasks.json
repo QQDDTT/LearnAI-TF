@@ -18,9 +18,7 @@
       "type": "shell",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
-        "test/test_modules.py",
-        "--config",
-        "config_test.yaml"
+        "test/test_modules.py"
       ],
       "options": {
         "env": {
