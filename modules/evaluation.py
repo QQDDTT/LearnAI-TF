@@ -215,14 +215,28 @@ class EvaluationManager(EvaluationInterface):
         all_results = {}
 
         # 获取所有模型
-        models = self.context.container.models
+        try:
+            from common.train_context import ObjectType
+            models = self.context.container.get_all(ObjectType.MODEL)
+        except (KeyError, AttributeError):
+            models = self.context.variables.get('models', {})
+
+        if not models:
+            logger.warning("没有找到可评估的模型")
+            return all_results
 
         if not models:
             logger.warning("没有找到可评估的模型")
             return all_results
 
         # 获取评估数据集
-        dataloaders = self.context.container.dataloaders
+        try:
+            dataloaders = self.context.container.get_all(ObjectType.DATALOADER)
+        except (KeyError, AttributeError):
+            if hasattr(self.context.container, 'dataloaders'):
+                dataloaders = self.context.container.dataloaders
+            else:
+                dataloaders = self.context.variables.get('data_loaders', {})
 
         # 为每个评估配置执行评估
         for eval_name, eval_config in self.evaluation_configs.items():

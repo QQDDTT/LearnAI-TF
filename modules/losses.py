@@ -112,7 +112,7 @@ class LossManager(LossManagerInterface):
         logger.debug(f"损失权重: {weight}")
 
         # 创建损失函数
-        loss_fn = call_target(reflection=reflection, args=args)
+        loss_fn = call_target(target=reflection, arguments=args)
 
         # 保存权重
         self.loss_weights[loss_name] = weight
@@ -271,4 +271,4 @@ def create_simple_loss(loss_type: str = 'mse', **kwargs) -> Any:
         raise ValueError(f"不支持的损失函数类型: {loss_type}")
 
     reflection = loss_map[loss_type.lower()]
-    return call_target(reflection=reflection, args=kwargs)
+    return call_target(target=reflection, arguments=kwargs)

@@ -15,8 +15,7 @@ from common.train_context import (
     PipelineConfig,
     StepConfig,
     LoopType,
-    BridgeAction,
-    parse_bridge
+    BridgeAction
 )
 from common.common import call_target, LoggerManager
 
@@ -116,12 +115,11 @@ class TrainingPipeline(TrainingPipelineInterface):
             return False
 
         # 验证步骤序列
-        if not self.current_pipeline.step_sequence:
-            logger.error("训练流程缺少步骤序列 (step_sequence)")
-            return False
+        if not self.current_pipeline.steps:
+            logger.warning("训练流程步骤列表为空，将使用默认训练步骤")
 
         # 验证每个步骤
-        for step_config in self.current_pipeline.step_sequence:
+        for step_config in self.current_pipeline.steps:
             if not step_config.reflection:
                 logger.error(f"步骤 '{step_config.name}' 缺少 reflection 配置")
                 return False
@@ -430,11 +428,11 @@ class TrainingPipeline(TrainingPipelineInterface):
         }
 
         # 执行步骤序列
-        step_sequence = self.current_pipeline.step_sequence
+        steps = self.current_pipeline.steps
 
         step_idx = 0
-        while step_idx < len(step_sequence):
-            step_config = step_sequence[step_idx]
+        while step_idx < len(steps):
+            step_config = steps[step_idx]
 
             # 执行步骤
             step_result = self.execute_step(step_config.name, step_config)
@@ -446,7 +444,7 @@ class TrainingPipeline(TrainingPipelineInterface):
                     epoch_result[key] = value
 
             # 处理 Bridge 控制
-            next_idx = self._handle_bridge(step_config, step_idx, step_sequence)
+            next_idx = self._handle_bridge(step_config, step_idx, steps)
 
             if next_idx is None:
                 # 正常前进
@@ -525,7 +523,7 @@ class TrainingPipeline(TrainingPipelineInterface):
             "done": False
         }
 
-        step_sequence = self.current_pipeline.step_sequence
+        steps = self.current_pipeline.steps
 
         # Step 循环
         for step in range(max_steps):
@@ -534,8 +532,8 @@ class TrainingPipeline(TrainingPipelineInterface):
 
             # 执行步骤序列
             step_idx = 0
-            while step_idx < len(step_sequence):
-                step_config = step_sequence[step_idx]
+            while step_idx < len(steps):
+                step_config = steps[step_idx]
 
                 # 执行步骤
                 step_result = self.execute_step(step_config.name, step_config)
@@ -552,7 +550,7 @@ class TrainingPipeline(TrainingPipelineInterface):
                     return episode_result
 
                 # 处理 Bridge 控制
-                next_idx = self._handle_bridge(step_config, step_idx, step_sequence)
+                next_idx = self._handle_bridge(step_config, step_idx, steps)
 
                 if next_idx is None:
                     step_idx += 1
@@ -638,11 +636,11 @@ class TrainingPipeline(TrainingPipelineInterface):
             "steps": []
         }
 
-        step_sequence = self.current_pipeline.step_sequence
+        steps = self.current_pipeline.steps
 
         step_idx = 0
-        while step_idx < len(step_sequence):
-            step_config = step_sequence[step_idx]
+        while step_idx < len(steps):
+            step_config = steps[step_idx]
 
             # 执行步骤
             step_result = self.execute_step(step_config.name, step_config)
@@ -654,7 +652,7 @@ class TrainingPipeline(TrainingPipelineInterface):
                     iteration_result[key] = value
 
             # 处理 Bridge 控制
-            next_idx = self._handle_bridge(step_config, step_idx, step_sequence)
+            next_idx = self._handle_bridge(step_config, step_idx, steps)
 
             if next_idx is None:
                 step_idx += 1
@@ -707,18 +705,18 @@ class TrainingPipeline(TrainingPipelineInterface):
             "steps": []
         }
 
-        step_sequence = self.current_pipeline.step_sequence
+        steps = self.current_pipeline.steps
 
         step_idx = 0
-        while step_idx < len(step_sequence):
-            step_config = step_sequence[step_idx]
+        while step_idx < len(steps):
+            step_config = steps[step_idx]
 
             # 执行步骤
             step_result = self.execute_step(step_config.name, step_config)
             results["steps"].append(step_result)
 
             # 处理 Bridge 控制
-            next_idx = self._handle_bridge(step_config, step_idx, step_sequence)
+            next_idx = self._handle_bridge(step_config, step_idx, steps)
 
             if next_idx is None:
                 step_idx += 1
@@ -824,7 +822,7 @@ class TrainingPipeline(TrainingPipelineInterface):
         self,
         step_config: StepConfig,
         current_idx: int,
-        step_sequence: List[StepConfig]
+        steps: List[StepConfig]
     ) -> Optional[int]:
         """
         处理 Bridge 控制流
@@ -832,7 +830,7 @@ class TrainingPipeline(TrainingPipelineInterface):
         参数:
             step_config: 当前步骤配置
             current_idx: 当前步骤索引
-            step_sequence: 步骤序列
+            steps: 步骤序列
 
         返回:
             下一个步骤的索引，None 表示正常继续
@@ -846,10 +844,10 @@ class TrainingPipeline(TrainingPipelineInterface):
         logger.debug(f"处理 Bridge: {action}")
 
         if action == BridgeAction.JUMP.value:
-            return self._handle_jump(bridge, step_sequence)
+            return self._handle_jump(bridge, steps)
 
         elif action == BridgeAction.CONDITIONAL.value:
-            return self._handle_conditional(bridge, current_idx, step_sequence)
+            return self._handle_conditional(bridge, current_idx, steps)
 
         elif action == BridgeAction.LOOP.value:
             return self._handle_loop_bridge(bridge, current_idx)
@@ -860,7 +858,7 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         elif action == BridgeAction.CONTINUE.value:
             # 跳到下一个循环迭代
-            return len(step_sequence)
+            return len(steps)
 
         elif action == BridgeAction.ERROR_HANDLER.value:
             return self._handle_error(bridge)
@@ -873,7 +871,7 @@ class TrainingPipeline(TrainingPipelineInterface):
             logger.warning(f"未知的 Bridge 动作: {action}")
             return None
 
-    def _handle_jump(self, bridge, step_sequence: List[StepConfig]) -> Optional[int]:
+    def _handle_jump(self, bridge, steps: List[StepConfig]) -> Optional[int]:
         """处理 JUMP 动作"""
         if not bridge.targets:
             return None
@@ -881,7 +879,7 @@ class TrainingPipeline(TrainingPipelineInterface):
         target_step_id = bridge.targets[0]
 
         # 查找目标步骤
-        for idx, step in enumerate(step_sequence):
+        for idx, step in enumerate(steps):
             if step.step_id == target_step_id:
                 logger.debug(f"跳转到步骤: {target_step_id}")
                 return idx
@@ -893,7 +891,7 @@ class TrainingPipeline(TrainingPipelineInterface):
         self,
         bridge,
         current_idx: int,
-        step_sequence: List[StepConfig]
+        steps: List[StepConfig]
     ) -> Optional[int]:
         """处理 CONDITIONAL 动作"""
         condition = bridge.condition
@@ -908,7 +906,7 @@ class TrainingPipeline(TrainingPipelineInterface):
             # 条件为真，跳转到第一个目标
             if bridge.targets:
                 target_step_id = bridge.targets[0]
-                for idx, step in enumerate(step_sequence):
+                for idx, step in enumerate(steps):
                     if step.step_id == target_step_id:
                         logger.debug(f"条件为真，跳转到: {target_step_id}")
                         return idx
@@ -916,7 +914,7 @@ class TrainingPipeline(TrainingPipelineInterface):
             # 条件为假，跳转到第二个目标（如果有）
             if len(bridge.targets) > 1:
                 target_step_id = bridge.targets[1]
-                for idx, step in enumerate(step_sequence):
+                for idx, step in enumerate(steps):
                     if step.step_id == target_step_id:
                         logger.debug(f"条件为假，跳转到: {target_step_id}")
                         return idx
@@ -980,7 +978,7 @@ class TrainingPipeline(TrainingPipelineInterface):
             if bridge.targets:
                 target_step_id = bridge.targets[0]
                 # 查找目标步骤索引
-                for idx, step_cfg in enumerate(self.current_pipeline.step_sequence):
+                for idx, step_cfg in enumerate(self.current_pipeline.steps):
                     if step_cfg.step_id == target_step_id:
                         return idx
         else:

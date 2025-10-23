@@ -90,6 +90,66 @@ class DataManager(DataManagerInterface):
         logger.info("数据配置验证通过")
         return True
 
+    def validate_data_sources(self) -> bool:
+        """
+        验证数据源配置（接口要求的方法）
+
+        返回:
+            配置是否有效
+        """
+        # 调用现有的验证方法
+        return self.validate_data_configs()
+
+    def build_data_source(
+        self,
+        source_name: str,
+        source_splits: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        构建单个数据源的所有分割（接口要求的方法）
+
+        参数:
+            source_name: 数据源名称
+            source_splits: 数据分割配置 {split_name: config}
+
+        返回:
+            数据加载器字典 {split_name: loader}
+        """
+        # 如果 source_splits 是一个配置字典，直接加载
+        if 'type' in source_splits or 'reflection' in source_splits:
+            return self.load_data_source(source_name, source_splits)
+
+        # 如果包含多个分割（train/val/test），分别加载
+        loaders = {}
+        for split_name, split_config in source_splits.items():
+            loader_name = f"{source_name}_{split_name}"
+            loaders[split_name] = self.load_data_source(loader_name, split_config)
+
+        return loaders
+
+    def build_all_data_sources(self) -> Dict[str, Dict[str, Any]]:
+        """
+        构建所有数据源（接口要求的方法）
+
+        返回:
+            所有数据加载器 {source_name: {split_name: loader}}
+        """
+        # 调用现有的加载方法
+        all_loaders = self.load_all_data()
+
+        # 转换格式：从 {source_name: loader} 转为 {source_name: {split: loader}}
+        # 如果原来的格式已经是嵌套的，直接返回
+        result = {}
+        for source_name, loader in all_loaders.items():
+            if isinstance(loader, dict):
+                # 已经是嵌套格式
+                result[source_name] = loader
+            else:
+                # 单个加载器，包装为字典
+                result[source_name] = {'default': loader}
+
+        return result
+
     def load_data_source(
         self,
         source_name: str,

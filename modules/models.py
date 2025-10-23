@@ -164,8 +164,8 @@ class ModelBuilder(ModelBuilderInterface):
 
         # 创建 Sequential 模型
         model = call_target(
-            reflection="tensorflow.keras:Sequential",
-            args={'layers': layers, 'name': model_name}
+            target="tensorflow.keras:Sequential",
+            arguments={'layers': layers, 'name': model_name}
         )
 
         logger.info(f"Sequential 模型 '{model_name}' 构建完成，共 {len(layers)} 层")
@@ -229,7 +229,7 @@ class ModelBuilder(ModelBuilderInterface):
         logger.debug(f"创建层: {layer_name} ({reflection})")
 
         # 创建层
-        layer = call_target(reflection=reflection, args=args)
+        layer = call_target(target=reflection, arguments=args)
 
         # 缓存层
         self.layer_cache[layer_name] = layer

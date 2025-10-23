@@ -142,7 +142,7 @@ class OptimizerManager(OptimizerManagerInterface):
             args['weight_decay'] = weight_decay
 
         # Step 4: 创建优化器
-        optimizer = call_target(reflection=reflection, args=args)
+        optimizer = call_target(target=reflection, arguments=args)
 
         return optimizer
 
@@ -181,7 +181,7 @@ class OptimizerManager(OptimizerManagerInterface):
             schedule_args['initial_learning_rate'] = learning_rate
 
         # 创建调度器
-        lr_schedule = call_target(reflection=reflection, args=schedule_args)
+        lr_schedule = call_target(target=reflection, arguments=schedule_args)
 
         # 缓存调度器
         self.lr_schedules[optimizer_name] = lr_schedule
@@ -429,8 +429,8 @@ class OptimizerManager(OptimizerManagerInterface):
 
         # 保存
         call_target(
-            reflection="numpy:save",
-            args={'file': filepath, 'arr': weights}
+            target="numpy:save",
+            arguments={'file': filepath, 'arr': weights}
         )
 
     def load_optimizer_state(
@@ -449,8 +449,8 @@ class OptimizerManager(OptimizerManagerInterface):
 
         # 加载权重
         weights = call_target(
-            reflection="numpy:load",
-            args={'file': filepath, 'allow_pickle': True}
+            target="numpy:load",
+            arguments={'file': filepath, 'allow_pickle': True}
         )
 
         # 设置权重
@@ -546,4 +546,4 @@ def create_simple_optimizer(
     reflection = optimizer_map[optimizer_type.lower()]
     args = {'learning_rate': learning_rate, **kwargs}
 
-    return call_target(reflection=reflection, args=args)
+    return call_target(target=reflection, arguments=args)

@@ -433,13 +433,11 @@ class TestDataManager(unittest.TestCase):
 
         # 只测试能否创建，不测试连接
         try:
-            # 这里假设 NetworkClient 在 common.utils 中
             # 如果不存在，测试会失败但不影响其他测试
             client = call_target(client_cfg['reflection'], client_cfg['args'])
             logger.info("✓ NetworkClient 创建成功（未测试连接）")
         except Exception as e:
             logger.warning(f"⚠ NetworkClient 创建失败: {e}")
-            logger.warning("  这是正常的，如果 common.utils:NetworkClient 未实现")
 
 
 # ============================================================
@@ -833,7 +831,7 @@ def main():
 
 if __name__ == '__main__':
     exit_code = main()
-    sys.exit(exit_code)
+    os._exit(exit_code)
 
 
 # ============================================================
