@@ -21,7 +21,8 @@
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
       "args": [
-        "${input:selectConfig}"
+        "${input:selectConfig}",
+        "--export"
       ],
       "env": {
         "LOG_HOME": "/home/nick/logs"
