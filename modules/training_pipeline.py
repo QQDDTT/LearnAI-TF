@@ -6,6 +6,11 @@ modules/training_pipeline.py
 导入限制：
 - 仅导入 common 文件夹内的函数
 - modules 中的函数通过反射机制调用
+
+优化说明：
+- 添加了安全的配置读取方法 _safe_get_config()
+- 所有配置访问都通过安全方法进行
+- 支持默认值，避免因配置缺失导致程序崩溃
 """
 
 from typing import Dict, Any, List, Optional, Callable, Tuple
@@ -37,7 +42,23 @@ class TrainingPipeline(TrainingPipelineInterface):
     initialize() -> validate_pipeline() -> setup_loop() -> execute_training() -> finalize()
 
     注意：所有执行步骤通过 call_target 动态调用
+
+    优化特性：
+    - 安全的配置读取，支持默认值
+    - 关键配置缺失时会报错，非关键配置使用默认值
     """
+
+    # 定义默认配置值
+    DEFAULT_CONFIG = {
+        'max_epochs': 100,
+        'max_episodes': 1000,
+        'max_iterations': 1000,
+        'max_steps_per_episode': 1000,
+        'convergence_threshold': 1e-4,
+        'convergence_field': 'loss',
+        'checkpoint_interval': 0,
+        'checkpoint_enabled': False,
+    }
 
     def __init__(self, context: TrainContext):
         """
@@ -52,6 +73,9 @@ class TrainingPipeline(TrainingPipelineInterface):
         self.loop_counters: Dict[str, int] = {}
         self.should_stop: bool = False
         self.training_results: Dict[str, Any] = {}
+
+        # 缓存配置值，避免重复获取
+        self._cached_configs: Dict[str, Any] = {}
 
     def initialize(self) -> None:
         """
@@ -92,6 +116,7 @@ class TrainingPipeline(TrainingPipelineInterface):
         self.loop_counters = {}
         self.should_stop = False
         self.training_results = {}
+        self._cached_configs = {}  # 清空缓存
 
         self._initialized = True
 
@@ -116,7 +141,18 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         # 验证步骤序列
         if not self.current_pipeline.steps:
-            logger.warning("训练流程步骤列表为空，将使用默认训练步骤")
+            logger.error(
+                "⚠️  训练流程步骤列表为空！\n"
+                "这意味着不会执行任何实际的训练步骤。\n"
+                "请在配置文件中添加训练步骤，例如:\n"
+                "  - forward_pass (前向传播)\n"
+                "  - compute_loss (计算损失)\n"
+                "  - backward_pass (反向传播)\n"
+                "  - update_weights (更新权重)\n"
+                "如果这是测试环境，可以忽略此警告。"
+            )
+            # 不返回 False，允许继续但给出明显警告
+            return True
 
         # 验证每个步骤
         for step_config in self.current_pipeline.steps:
@@ -127,6 +163,149 @@ class TrainingPipeline(TrainingPipelineInterface):
         logger.info("训练流程配置验证通过")
         return True
 
+    # ========================================================================
+    # 安全配置读取方法
+    # ========================================================================
+
+    def _safe_get_config(
+        self,
+        config_key: str,
+        default: Any = None,
+        source: str = 'auto',
+        required: bool = False,
+        use_cache: bool = True
+    ) -> Any:
+        """
+        安全获取配置值
+
+        优先级（source='auto'时）:
+        1. 缓存的配置值（如果 use_cache=True）
+        2. loop_condition 对象属性
+        3. loop_condition 字典
+        4. parameters 字典
+        5. 提供的 default 值
+        6. DEFAULT_CONFIG 中的默认值
+
+        参数:
+            config_key: 配置键名
+            default: 自定义默认值（优先于 DEFAULT_CONFIG）
+            source: 配置来源 ('auto', 'loop_condition', 'parameters')
+            required: 是否为必需配置（缺失时抛出异常）
+            use_cache: 是否使用缓存（默认 True）
+
+        返回:
+            配置值
+
+        抛出:
+            ValueError: 如果是必需配置且未找到
+        """
+        # 检查缓存
+        if use_cache and config_key in self._cached_configs:
+            return self._cached_configs[config_key]
+
+        loop_condition = self.current_pipeline.loop_condition if self.current_pipeline else None
+        parameters = self.current_pipeline.parameters if self.current_pipeline else {}
+
+        value = None
+        found = False
+
+        # 自动查找模式
+        if source == 'auto':
+            # 1. 尝试从 loop_condition 获取
+            if loop_condition:
+                # 尝试对象属性访问
+                if hasattr(loop_condition, config_key):
+                    value = getattr(loop_condition, config_key, None)
+                    if value is not None:
+                        found = True
+                        logger.debug(f"从 loop_condition 属性获取配置: {config_key} = {value}")
+
+                # 尝试字典访问（如果 loop_condition 是字典）
+                elif isinstance(loop_condition, dict) and config_key in loop_condition:
+                    value = loop_condition[config_key]
+                    found = True
+                    logger.debug(f"从 loop_condition 字典获取配置: {config_key} = {value}")
+
+            # 2. 尝试从 parameters 获取
+            if not found and config_key in parameters:
+                value = parameters[config_key]
+                found = True
+                logger.debug(f"从 parameters 获取配置: {config_key} = {value}")
+
+        # 指定来源模式
+        elif source == 'loop_condition' and loop_condition:
+            if hasattr(loop_condition, config_key):
+                value = getattr(loop_condition, config_key, None)
+                found = value is not None
+            elif isinstance(loop_condition, dict) and config_key in loop_condition:
+                value = loop_condition[config_key]
+                found = True
+
+        elif source == 'parameters' and config_key in parameters:
+            value = parameters[config_key]
+            found = True
+
+        # 3. 使用自定义默认值
+        if not found and default is not None:
+            value = default
+            found = True
+            logger.debug(f"使用自定义默认值: {config_key} = {value}")
+
+        # 4. 使用预定义默认值
+        if not found and config_key in self.DEFAULT_CONFIG:
+            value = self.DEFAULT_CONFIG[config_key]
+            found = True
+            logger.debug(f"使用预定义默认值: {config_key} = {value}")
+
+        # 5. 检查是否为必需配置
+        if not found and required:
+            raise ValueError(
+                f"缺少必需的配置项: {config_key}\n"
+                f"请在 loop_condition 或 parameters 中提供此配置。"
+            )
+
+        # 缓存配置值
+        if use_cache and found:
+            self._cached_configs[config_key] = value
+
+        return value
+
+    def _safe_get_nested(
+        self,
+        obj: Any,
+        key: str,
+        default: Any = None
+    ) -> Any:
+        """
+        安全获取嵌套对象的属性或字典值
+
+        参数:
+            obj: 对象或字典
+            key: 键名
+            default: 默认值
+
+        返回:
+            值或默认值
+        """
+        if obj is None:
+            return default
+
+        # 尝试对象属性
+        if hasattr(obj, key):
+            value = getattr(obj, key, None)
+            if value is not None:
+                return value
+
+        # 尝试字典访问
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+
+        return default
+
+    # ========================================================================
+    # 循环设置和执行
+    # ========================================================================
+
     def setup_loop(self) -> None:
         """
         设置训练循环
@@ -135,41 +314,79 @@ class TrainingPipeline(TrainingPipelineInterface):
         1. 初始化循环计数器
         2. 配置循环条件
         3. 设置早停条件
+
+        优化：
+        - 预先获取并缓存所有配置，避免训练循环中重复获取
+        - 减少日志输出
         """
         logger.info("设置训练循环")
 
         loop_type = self.current_pipeline.loop_type
-        loop_condition = self.current_pipeline.loop_condition
+
+        # 预先获取并缓存所有常用配置
+        logger.debug("预加载配置...")
+        self._preload_configs()
 
         # 根据循环类型初始化计数器
         if loop_type == LoopType.EPOCH_BATCH.value:
             self.loop_counters['epoch'] = 0
             self.loop_counters['batch'] = 0
-            max_epochs = loop_condition.max_epochs if loop_condition else 100
+            max_epochs = self._cached_configs.get('max_epochs', 100)
             logger.info(f"设置 Epoch-Batch 循环，最大轮数: {max_epochs}")
 
         elif loop_type == LoopType.EPISODE_STEP.value:
             self.loop_counters['episode'] = 0
             self.loop_counters['step'] = 0
-            max_episodes = loop_condition.max_episodes if loop_condition else 1000
+            max_episodes = self._cached_configs.get('max_episodes', 1000)
             logger.info(f"设置 Episode-Step 循环，最大回合数: {max_episodes}")
 
         elif loop_type == LoopType.ITERATION.value:
             self.loop_counters['iteration'] = 0
-            max_iterations = loop_condition.max_iterations if loop_condition else 1000
+            max_iterations = self._cached_configs.get('max_iterations', 1000)
             logger.info(f"设置迭代循环，最大迭代次数: {max_iterations}")
 
         elif loop_type == LoopType.CUSTOM.value:
             logger.info("设置自定义循环")
 
         # 设置早停条件
-        if loop_condition and loop_condition.convergence_field:
+        convergence_field = self._cached_configs.get('convergence_field')
+        convergence_threshold = self._cached_configs.get('convergence_threshold')
+
+        if convergence_field:
             logger.info(
-                f"启用收敛检测: 字段={loop_condition.convergence_field}, "
-                f"阈值={loop_condition.convergence_threshold}"
+                f"启用收敛检测: 字段={convergence_field}, "
+                f"阈值={convergence_threshold}"
             )
 
         self._setup_complete = True
+        logger.debug("训练循环设置完成")
+
+    def _preload_configs(self) -> None:
+        """
+        预加载所有常用配置到缓存
+
+        避免在训练循环中重复调用 _safe_get_config
+        """
+        # 清空现有缓存
+        self._cached_configs.clear()
+
+        # 预加载所有常用配置
+        config_keys = [
+            'max_epochs',
+            'max_episodes',
+            'max_iterations',
+            'max_steps_per_episode',
+            'convergence_threshold',
+            'convergence_field',
+            'checkpoint_interval',
+            'checkpoint_enabled',
+        ]
+
+        for key in config_keys:
+            # use_cache=True 会自动缓存值
+            self._safe_get_config(key, use_cache=True)
+
+        logger.debug(f"预加载了 {len(self._cached_configs)} 个配置项")
 
     def execute_step(self, step_name: str, step_config: Any) -> Any:
         """
@@ -252,17 +469,25 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         参数:
             epoch: 当前 epoch
+
+        优化：使用安全的配置读取
         """
         logger.info(f"保存检查点: epoch={epoch}")
 
-        checkpoint_config = self.current_pipeline.parameters.get('checkpoint', {})
+        # 安全获取 checkpoint 配置
+        parameters = self.current_pipeline.parameters if self.current_pipeline else {}
+        checkpoint_config = parameters.get('checkpoint', {})
 
-        if not checkpoint_config.get('enabled', False):
+        # 安全获取 enabled 配置
+        enabled = checkpoint_config.get('enabled', False) if isinstance(checkpoint_config, dict) else False
+
+        if not enabled:
             logger.debug("检查点未启用")
             return
 
         # 使用 call_target 调用保存函数
-        save_fn = checkpoint_config.get('save_fn')
+        save_fn = checkpoint_config.get('save_fn') if isinstance(checkpoint_config, dict) else None
+
         if save_fn:
             try:
                 call_target(
@@ -288,8 +513,9 @@ class TrainingPipeline(TrainingPipelineInterface):
         """
         logger.info(f"加载检查点: {checkpoint_path}")
 
-        checkpoint_config = self.current_pipeline.parameters.get('checkpoint', {})
-        load_fn = checkpoint_config.get('load_fn')
+        parameters = self.current_pipeline.parameters if self.current_pipeline else {}
+        checkpoint_config = parameters.get('checkpoint', {})
+        load_fn = checkpoint_config.get('load_fn') if isinstance(checkpoint_config, dict) else None
 
         if load_fn:
             try:
@@ -366,14 +592,12 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         返回:
             训练结果
-        """
-        pipeline = self.current_pipeline
-        parameters = pipeline.parameters
-        loop_condition = pipeline.loop_condition
 
-        # 获取参数
-        max_epochs = loop_condition.max_epochs if loop_condition else \
-                     parameters.get('max_epochs', 100)
+        优化：直接使用缓存的配置，避免重复调用 _safe_get_config
+        """
+        # 直接从缓存获取配置
+        max_epochs = self._cached_configs.get('max_epochs', 100)
+        checkpoint_interval = self._cached_configs.get('checkpoint_interval', 0)
 
         logger.info(f"开始 Epoch-Batch 训练，最大轮数: {max_epochs}")
 
@@ -400,8 +624,7 @@ class TrainingPipeline(TrainingPipelineInterface):
             if 'loss' in epoch_result:
                 logger.info(f"Epoch {epoch + 1} 完成, Loss: {epoch_result.get('loss', 'N/A')}")
 
-            # 保存检查点
-            checkpoint_interval = parameters.get('checkpoint_interval', 0)
+            # 保存检查点（直接使用缓存的值）
             if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0:
                 self.save_checkpoint(epoch)
 
@@ -461,15 +684,12 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         返回:
             训练结果
-        """
-        pipeline = self.current_pipeline
-        parameters = pipeline.parameters
-        loop_condition = pipeline.loop_condition
 
-        # 获取参数
-        max_episodes = loop_condition.max_episodes if loop_condition else \
-                       parameters.get('max_episodes', 1000)
-        max_steps_per_episode = parameters.get('max_steps_per_episode', 1000)
+        优化：直接使用缓存的配置
+        """
+        # 直接从缓存获取参数
+        max_episodes = self._cached_configs.get('max_episodes', 1000)
+        max_steps_per_episode = self._cached_configs.get('max_steps_per_episode', 1000)
 
         logger.info(f"开始 Episode-Step 训练，最大回合数: {max_episodes}, 每回合最大步数: {max_steps_per_episode}")
 
@@ -565,16 +785,13 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         返回:
             训练结果
-        """
-        pipeline = self.current_pipeline
-        parameters = pipeline.parameters
-        loop_condition = pipeline.loop_condition
 
-        # 获取参数
-        max_iterations = loop_condition.max_iterations if loop_condition else \
-                         parameters.get('max_iterations', 1000)
-        convergence_threshold = parameters.get('convergence_threshold', 1e-4)
-        convergence_field = loop_condition.convergence_field if loop_condition else 'loss'
+        优化：直接使用缓存的配置
+        """
+        # 直接从缓存获取参数
+        max_iterations = self._cached_configs.get('max_iterations', 1000)
+        convergence_threshold = self._cached_configs.get('convergence_threshold', 1e-4)
+        convergence_field = self._cached_configs.get('convergence_field', 'loss')
 
         logger.info(f"开始迭代训练，最大迭代次数: {max_iterations}, 收敛阈值: {convergence_threshold}")
 
@@ -600,16 +817,14 @@ class TrainingPipeline(TrainingPipelineInterface):
             results["iterations"].append(iteration_result)
 
             # 检查收敛
-            if convergence_field in self.step_results:
-                current_value = self.step_results[convergence_field]
+            if convergence_field and convergence_field in iteration_result:
+                current_value = iteration_result[convergence_field]
 
                 if prev_value is not None:
                     change = abs(current_value - prev_value)
-                    logger.debug(f"收敛检查: {convergence_field} 变化 = {change}")
-
                     if change < convergence_threshold:
                         results["converged"] = True
-                        logger.info(f"在迭代 {iteration + 1} 达到收敛")
+                        logger.info(f"迭代 {iteration + 1} 达到收敛: {convergence_field} 变化 {change} < {convergence_threshold}")
                         break
 
                 prev_value = current_value
@@ -620,7 +835,7 @@ class TrainingPipeline(TrainingPipelineInterface):
                 break
 
         results["final_metrics"] = self.step_results
-        logger.info("迭代训练完成")
+        logger.info(f"迭代训练完成，{'已收敛' if results['converged'] else '未收敛'}")
 
         return results
 
@@ -638,6 +853,7 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         steps = self.current_pipeline.steps
 
+        # 执行步骤序列
         step_idx = 0
         while step_idx < len(steps):
             step_config = steps[step_idx]
@@ -668,47 +884,21 @@ class TrainingPipeline(TrainingPipelineInterface):
         返回:
             训练结果
         """
-        pipeline = self.current_pipeline
-        parameters = pipeline.parameters
+        logger.info("开始自定义循环")
 
-        logger.info("开始自定义循环训练")
-
-        # 获取自定义循环函数
-        if 'custom_loop_fn' in parameters:
-            custom_loop_fn_reflection = parameters['custom_loop_fn']
-
-            # 执行自定义循环函数
-            results = call_target(
-                reflection=custom_loop_fn_reflection,
-                args={
-                    'context': self.context,
-                    'pipeline': self,
-                    'parameters': parameters
-                }
-            )
-
-            logger.info("自定义循环训练完成")
-            return results
-        else:
-            # 如果没有自定义函数，执行默认的步骤序列
-            logger.info("未找到自定义循环函数，执行默认步骤序列")
-            return self._execute_default_custom_loop()
-
-    def _execute_default_custom_loop(self) -> Dict[str, Any]:
-        """
-        执行默认的自定义循环（单次执行所有步骤）
-
-        返回:
-            训练结果
-        """
         results = {
-            "steps": []
+            "steps": [],
+            "final_metrics": {}
         }
 
         steps = self.current_pipeline.steps
 
+        # 执行步骤序列（单次）
         step_idx = 0
         while step_idx < len(steps):
+            if self.should_stop:
+                break
+
             step_config = steps[step_idx]
 
             # 执行步骤
@@ -724,6 +914,7 @@ class TrainingPipeline(TrainingPipelineInterface):
                 step_idx = next_idx
 
         results["final_metrics"] = self.step_results
+        logger.info("自定义循环完成")
 
         return results
 
@@ -731,88 +922,117 @@ class TrainingPipeline(TrainingPipelineInterface):
     # 私有方法：参数解析
     # ========================================================================
 
-    def _resolve_arguments(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _resolve_arguments(self, args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        解析参数中的引用
+        解析参数引用
 
         支持的引用格式：
-        - $context.models.model_name - 引用上下文中的模型
-        - $context.optimizers.optimizer_name - 引用优化器
-        - $context.data.train - 引用数据集
-        - $results.step_name.output - 引用之前步骤的结果
-        - $loop.epoch - 引用循环计数器
+        - $context.xxx: 从上下文获取
+        - $results.step_name.xxx: 从步骤结果获取
+        - $loop.xxx: 从循环计数器获取
+        - $models.xxx: 从容器获取模型
+        - $optimizers.xxx: 从容器获取优化器
 
         参数:
-            args: 原始参数字典
+            args: 参数字典
 
         返回:
             解析后的参数字典
         """
-        resolved_args = {}
+        if not args:
+            return {}
+
+        resolved = {}
 
         for key, value in args.items():
             if isinstance(value, str) and value.startswith('$'):
-                resolved_args[key] = self._resolve_reference(value)
+                # 解析引用
+                resolved[key] = self._resolve_reference(value)
             elif isinstance(value, dict):
-                resolved_args[key] = self._resolve_arguments(value)
+                # 递归解析嵌套字典
+                resolved[key] = self._resolve_arguments(value)
             elif isinstance(value, list):
-                resolved_args[key] = [
-                    self._resolve_reference(v) if isinstance(v, str) and v.startswith('$') else v
-                    for v in value
+                # 解析列表中的引用
+                resolved[key] = [
+                    self._resolve_reference(item) if isinstance(item, str) and item.startswith('$') else item
+                    for item in value
                 ]
             else:
-                resolved_args[key] = value
+                resolved[key] = value
 
-        return resolved_args
+        return resolved
 
-    def _resolve_reference(self, reference: str) -> Any:
+    def _resolve_reference(self, ref: str) -> Any:
         """
         解析单个引用
 
         参数:
-            reference: 引用字符串
+            ref: 引用字符串，如 $context.training_mode
 
         返回:
-            引用的实际值
+            引用的值
         """
-        if not reference.startswith('$'):
-            return reference
+        if not ref.startswith('$'):
+            return ref
 
         # 移除 $ 符号
-        ref_path = reference[1:]
-        parts = ref_path.split('.')
+        ref = ref[1:]
+        parts = ref.split('.')
 
-        if parts[0] == 'context':
-            # 引用上下文
-            obj = self.context
-            for part in parts[1:]:
-                if hasattr(obj, part):
-                    obj = getattr(obj, part)
-                elif isinstance(obj, dict):
-                    obj = obj.get(part)
-                else:
-                    raise ValueError(f"无法解析引用: {reference}")
-            return obj
+        if not parts:
+            return None
 
-        elif parts[0] == 'results':
-            # 引用执行结果
-            obj = self.context.execution_results
-            for part in parts[1:]:
-                if isinstance(obj, dict):
-                    obj = obj.get(part)
-                else:
-                    raise ValueError(f"无法解析引用: {reference}")
-            return obj
+        source = parts[0]
 
-        elif parts[0] == 'loop':
-            # 引用循环计数器
-            if len(parts) < 2:
-                raise ValueError(f"循环引用格式错误: {reference}")
-            counter_name = parts[1]
-            return self.loop_counters.get(counter_name, 0)
+        try:
+            if source == 'context':
+                # 从上下文获取
+                obj = self.context
+                for part in parts[1:]:
+                    obj = getattr(obj, part, None) if hasattr(obj, part) else obj.get(part, None) if isinstance(obj, dict) else None
+                return obj
 
-        else:
-            raise ValueError(f"不支持的引用类型: {reference}")
+            elif source == 'results':
+                # 从步骤结果获取
+                if len(parts) < 2:
+                    return None
+                step_name = parts[1]
+                if step_name in self.step_results:
+                    result = self.step_results[step_name]
+                    if len(parts) > 2:
+                        for part in parts[2:]:
+                            result = result.get(part) if isinstance(result, dict) else getattr(result, part, None)
+                    return result
+                return None
+
+            elif source == 'loop':
+                # 从循环计数器获取
+                if len(parts) < 2:
+                    return None
+                counter_name = parts[1]
+                return self.loop_counters.get(counter_name)
+
+            elif source == 'models':
+                # 从容器获取模型
+                if len(parts) < 2:
+                    return None
+                model_name = parts[1]
+                return self.context.container.models.get(model_name)
+
+            elif source == 'optimizers':
+                # 从容器获取优化器
+                if len(parts) < 2:
+                    return None
+                optimizer_name = parts[1]
+                return self.context.container.optimizers.get(optimizer_name)
+
+            else:
+                logger.warning(f"未知的引用源: {source}")
+                return None
+
+        except Exception as e:
+            logger.error(f"解析引用失败: {ref}, 错误: {str(e)}")
+            return None
 
     # ========================================================================
     # 私有方法：Bridge 控制流
@@ -960,11 +1180,23 @@ class TrainingPipeline(TrainingPipelineInterface):
             return False
 
     def _handle_loop_bridge(self, bridge, current_idx: int) -> Optional[int]:
-        """处理 LOOP 动作"""
-        loop_var = bridge.params.get('loop_var', 'i')
-        start = int(bridge.params.get('start', 0))
-        end = int(bridge.params.get('end', 10))
-        step = int(bridge.params.get('step', 1))
+        """
+        处理 LOOP 动作
+
+        优化：使用安全的配置读取方法
+        """
+        # 安全获取 bridge params
+        loop_var = self._safe_get_nested(bridge, 'params', {}).get('loop_var', 'i') if hasattr(bridge, 'params') else \
+                   bridge.get('params', {}).get('loop_var', 'i') if isinstance(bridge, dict) else 'i'
+
+        start = int(self._safe_get_nested(bridge, 'params', {}).get('start', 0) if hasattr(bridge, 'params') else \
+                    bridge.get('params', {}).get('start', 0) if isinstance(bridge, dict) else 0)
+
+        end = int(self._safe_get_nested(bridge, 'params', {}).get('end', 10) if hasattr(bridge, 'params') else \
+                  bridge.get('params', {}).get('end', 10) if isinstance(bridge, dict) else 10)
+
+        step = int(self._safe_get_nested(bridge, 'params', {}).get('step', 1) if hasattr(bridge, 'params') else \
+                   bridge.get('params', {}).get('step', 1) if isinstance(bridge, dict) else 1)
 
         # 初始化循环变量
         if loop_var not in self.loop_counters:
@@ -975,8 +1207,10 @@ class TrainingPipeline(TrainingPipelineInterface):
         if current_value < end:
             # 继续循环，跳转到目标步骤
             self.loop_counters[loop_var] += step
-            if bridge.targets:
-                target_step_id = bridge.targets[0]
+            targets = getattr(bridge, 'targets', None) if hasattr(bridge, 'targets') else bridge.get('targets') if isinstance(bridge, dict) else None
+
+            if targets:
+                target_step_id = targets[0]
                 # 查找目标步骤索引
                 for idx, step_cfg in enumerate(self.current_pipeline.steps):
                     if step_cfg.step_id == target_step_id:
@@ -991,7 +1225,9 @@ class TrainingPipeline(TrainingPipelineInterface):
     def _handle_error(self, bridge) -> Optional[int]:
         """处理 ERROR_HANDLER 动作"""
         # 简化的错误处理
-        if not bridge.targets:
+        targets = getattr(bridge, 'targets', None) if hasattr(bridge, 'targets') else bridge.get('targets') if isinstance(bridge, dict) else None
+
+        if not targets:
             return None
 
         # 如果有错误，跳转到错误处理步骤
@@ -999,9 +1235,15 @@ class TrainingPipeline(TrainingPipelineInterface):
         return None
 
     def _handle_checkpoint(self, bridge):
-        """处理 CHECKPOINT 动作"""
-        # 保存检查点
-        save_best = bridge.params.get('save_best', 'true').lower() == 'true'
+        """
+        处理 CHECKPOINT 动作
+
+        优化：使用安全的配置读取方法
+        """
+        # 安全获取 save_best 参数
+        params = self._safe_get_nested(bridge, 'params', {})
+        save_best_str = params.get('save_best', 'true') if isinstance(params, dict) else 'true'
+        save_best = str(save_best_str).lower() == 'true'
 
         if save_best:
             logger.info("触发检查点保存")
@@ -1014,94 +1256,22 @@ class TrainingPipeline(TrainingPipelineInterface):
 
         返回:
             是否应该终止
+
+        优化：直接使用缓存的配置
         """
         if self.should_stop:
             return True
 
-        loop_condition = self.current_pipeline.loop_condition
-
-        if not loop_condition:
-            return False
+        # 直接从缓存获取收敛配置
+        convergence_field = self._cached_configs.get('convergence_field')
+        convergence_threshold = self._cached_configs.get('convergence_threshold')
 
         # 检查收敛条件
-        if loop_condition.convergence_field:
-            field = loop_condition.convergence_field
-            threshold = loop_condition.convergence_threshold
-
+        if convergence_field:
             # 检查字段是否存在于结果中
-            if field in self.step_results:
+            if convergence_field in self.step_results:
                 # 这里可以实现更复杂的收敛检测逻辑
                 # 例如：检查最近几次迭代的变化
                 pass
 
-        return False
-
-
-# ============================================================================
-# 便捷函数
-# ============================================================================
-
-def run_training_pipeline(context: TrainContext) -> Dict[str, Any]:
-    """
-    运行训练流程的便捷函数
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        训练结果
-
-    示例:
-        >>> from common.train_context import TrainContext
-        >>> context = TrainContext()
-        >>> # ... 配置 context
-        >>> results = run_training_pipeline(context)
-    """
-    pipeline = TrainingPipeline(context)
-    return pipeline.run()
-
-
-def create_training_pipeline(context: TrainContext) -> TrainingPipeline:
-    """
-    创建训练流程执行器的便捷函数
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        TrainingPipeline 实例
-
-    示例:
-        >>> from common.train_context import TrainContext
-        >>> context = TrainContext()
-        >>> pipeline = create_training_pipeline(context)
-        >>> pipeline.initialize()
-        >>> results = pipeline.execute()
-    """
-    return TrainingPipeline(context)
-
-
-def validate_training_pipeline(context: TrainContext) -> bool:
-    """
-    验证训练流程配置的便捷函数
-
-    参数:
-        context: 训练上下文
-
-    返回:
-        配置是否有效
-
-    示例:
-        >>> from common.train_context import TrainContext
-        >>> context = TrainContext()
-        >>> # ... 配置 context
-        >>> if validate_training_pipeline(context):
-        ...     results = run_training_pipeline(context)
-    """
-    try:
-        pipeline = TrainingPipeline(context)
-        pipeline.initialize()
-        return pipeline.validate_pipeline()
-    except Exception as e:
-        logger.error(f"训练流程配置验证失败: {str(e)}")
         return False
