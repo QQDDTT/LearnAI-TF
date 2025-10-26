@@ -511,29 +511,7 @@ class RewardFunctionInterface(TrainContextAware):
 # ============================================================================
 
 class TrainingPipelineInterface(TrainContextAware):
-    """
-    训练流程执行器接口
-
-    职责：
-    1. 从 TrainContext.training_pipelines 读取配置
-    2. 执行训练步骤序列
-    3. 处理循环控制（epoch/episode/iteration）
-    4. 处理 Bridge 控制流（跳转、分支、循环）
-    5. 管理训练状态和检查点
-
-    标准流程：
-    initialize() -> validate_pipeline() -> setup_loop() -> execute_training() -> save_checkpoint() -> finalize()
-    """
-
-    @abstractmethod
-    def validate_pipeline(self) -> bool:
-        """
-        验证训练流程配置
-
-        返回:
-            配置是否有效
-        """
-        pass
+    """训练流程执行器接口"""
 
     @abstractmethod
     def setup_loop(self) -> None:
@@ -541,9 +519,10 @@ class TrainingPipelineInterface(TrainContextAware):
         设置训练循环
 
         职责：
-        1. 初始化循环计数器
-        2. 配置循环条件
-        3. 设置早停条件
+        1. 从 loop_config 读取循环类型和参数
+        2. 初始化循环计数器
+        3. 配置循环终止条件
+        4. 设置早停条件
         """
         pass
 
@@ -558,10 +537,28 @@ class TrainingPipelineInterface(TrainContextAware):
 
         参数:
             step_name: 步骤名称
-            step_config: 步骤配置
+            step_config: 步骤配置（包含 reflection, args, bridge）
 
         返回:
             步骤执行结果
+        """
+        pass
+
+    @abstractmethod
+    def handle_bridge(
+        self,
+        bridge_expr: str,
+        context: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        处理 Bridge 控制流（新增方法）
+
+        参数:
+            bridge_expr: Bridge 表达式（如 @SKIP:target?condition）
+            context: 当前执行上下文
+
+        返回:
+            跳转目标步骤名称，如果不跳转则返回 None
         """
         pass
 

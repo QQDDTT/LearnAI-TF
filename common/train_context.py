@@ -373,13 +373,43 @@ class StepConfig:
 
 
 @dataclass
+class LoopConfig:
+    """循环配置"""
+    type: str                                    # 循环类型
+    parameters: Dict[str, Any]                   # 循环参数
+    termination: Dict[str, Any]                  # 终止条件
+
+
+@dataclass
+class StepConfig:
+    """训练步骤配置"""
+    name: str                                    # 步骤名称
+    reflection: str                              # 步骤函数反射路径
+    args: Dict[str, Any] = field(default_factory=dict)  # 步骤参数
+    bridge: Optional[str] = None                 # Bridge表达式（可选）
+
+
+@dataclass
 class PipelineConfig:
     """训练流程配置"""
-    loop_type: str                    # 循环类型: epoch_batch, episode_step, iteration, custom
-    steps: List[StepConfig] = field(default_factory=list)  # 步骤列表
-    parameters: Dict[str, Any] = field(default_factory=dict)  # 流程参数
-    loop_condition: Optional[str] = None  # 循环条件
+    loop_config: LoopConfig                      # 循环配置
+    step_sequence: List[StepConfig] = field(default_factory=list)  # 步骤序列
 
+    # 向后兼容（可选）
+    @property
+    def loop_type(self) -> str:
+        """向后兼容：获取循环类型"""
+        return self.loop_config.type if self.loop_config else "custom"
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        """向后兼容：获取循环参数"""
+        return self.loop_config.parameters if self.loop_config else {}
+
+    @property
+    def steps(self) -> List[StepConfig]:
+        """向后兼容：获取步骤列表"""
+        return self.step_sequence
 
 @dataclass
 class EvaluationConfig:

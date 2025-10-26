@@ -16,53 +16,88 @@ class CollectionValidator(BaseValidator):
         self._collect_step_names(config)
 
     def _collect_layer_names(self, config: dict):
-        if "models" not in config or not isinstance(config["models"], dict):
+        """从 models 配置中收集层名称"""
+        if "models" not in config:
             return
 
-        for model_name, model_config in config["models"].items():
-            if "layers" not in model_config:
-                self.add_error(f"模型 '{model_name}' 缺少 'layers' 字段")
+        models_config = config["models"]
+        if not isinstance(models_config, dict):
+            return
+
+        for model_name, model_config in models_config.items():
+            if not isinstance(model_config, dict):
                 continue
 
-            if not isinstance(model_config["layers"], list):
-                self.add_error(f"模型 '{model_name}' 的 'layers' 必须是列表")
+            if "layers" not in model_config:
+                continue
+
+            layers = model_config["layers"]
+            if not isinstance(layers, list):
                 continue
 
             layer_names = set()
-            for i, layer in enumerate(model_config["layers"]):
-                if isinstance(layer, dict):
-                    layer_name = layer.get("name", f"layer_{i}")
-                    if layer_name in layer_names:
-                        self.add_warning(
-                            f"模型 '{model_name}' 中层名称重复: {layer_name}"
-                        )
-                    layer_names.add(layer_name)
+            for i, layer in enumerate(layers):
+                if not isinstance(layer, dict):
+                    continue
 
+                # 获取层名称（如果没有提供，使用索引）
+                layer_name = layer.get("name", f"layer_{i}")
+
+                # 检测重复
+                if layer_name in layer_names:
+                    self.add_warning(
+                        f"模型 '{model_name}' 中存在重复的层名称: {layer_name}"
+                    )
+
+                layer_names.add(layer_name)
+
+            # 注册到协调器
             self.context.set_layer_names(model_name, layer_names)
 
     def _collect_step_names(self, config: dict):
-        if "training_pipeline" not in config or not isinstance(config["training_pipeline"], dict):
+        """从 training_pipeline 配置中收集步骤名称"""
+        if "training_pipeline" not in config:
             return
 
-        for pipeline_name, pipeline_config in config["training_pipeline"].items():
-            if "step_sequence" not in pipeline_config:
-                self.add_error(f"流程 '{pipeline_name}' 缺少 'step_sequence' 字段")
+        pipeline_config = config["training_pipeline"]
+        if not isinstance(pipeline_config, dict):
+            return
+
+        # 遍历每个训练模式
+        for mode_name, mode_config in pipeline_config.items():
+            if not isinstance(mode_config, dict):
                 continue
 
-            if not isinstance(pipeline_config["step_sequence"], list):
-                self.add_error(
-                    f"流程 '{pipeline_name}' 的 'step_sequence' 必须是列表"
-                )
+            # ⚠️ 关键修改：从 step_sequence 读取（不是根级）
+            if "step_sequence" not in mode_config:
+                continue
+
+            step_sequence = mode_config["step_sequence"]
+            if not isinstance(step_sequence, list):
                 continue
 
             step_names = set()
-            for i, step in enumerate(pipeline_config["step_sequence"]):
-                if isinstance(step, dict):
-                    step_name = step.get("name", f"step_{i}")
-                    if step_name in step_names:
-                        self.add_warning(
-                            f"流程 '{pipeline_name}' 中步骤名称重复: {step_name}"
-                        )
-                    step_names.add(step_name)
+            for i, step in enumerate(step_sequence):
+                if not isinstance(step, dict):
+                    continue
 
-            self.context.set_step_names(pipeline_name, step_names)
+                # 获取步骤名称（必须提供）
+                if "name" not in step:
+                    self.add_error(
+                        f"training_pipeline.{mode_name}.step_sequence[{i}] "
+                        f"缺少必须字段: name"
+                    )
+                    continue
+
+                step_name = step["name"]
+
+                # 检测重复
+                if step_name in step_names:
+                    self.add_warning(
+                        f"训练流程 '{mode_name}' 中存在重复的步骤名称: {step_name}"
+                    )
+
+                step_names.add(step_name)
+
+            # 注册到协调器
+            self.context.set_step_names(mode_name, step_names)

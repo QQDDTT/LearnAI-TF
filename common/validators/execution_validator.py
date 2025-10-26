@@ -100,3 +100,21 @@ class ExecutionValidator(BaseValidator):
                 )
 
         return errors
+
+    def _validate_step_execution_units(self, config: dict):
+        """验证训练步骤的执行单元"""
+        if "training_pipeline" not in config:
+            return
+
+        for mode_name, mode_config in config["training_pipeline"].items():
+            if "step_sequence" not in mode_config:  # 改为从 step_sequence 读取
+                continue
+
+            step_sequence = mode_config["step_sequence"]
+            for step in step_sequence:
+                # 验证 reflection 字段
+                if "reflection" not in step:
+                    self.add_error(f"步骤缺少 reflection 字段")
+                # 验证 args 字段（可选）
+                if "args" in step and not isinstance(step["args"], dict):
+                    self.add_error(f"步骤的 args 必须是字典类型")
