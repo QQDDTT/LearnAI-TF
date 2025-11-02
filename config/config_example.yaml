@@ -1,0 +1,1102 @@
+# ============================================================
+# 通用深度学习训练配置框架 v5.0
+# 四层结构设计：模块层 → 常量层 → layers → 执行层
+# 注意：lib资源仅使用 lib.deployment
+# ============================================================
+
+# ============================================================
+# 第一层：模块层 (缺一不可的主要步骤)
+# ============================================================
+# 说明：定义模型训练的主要模块，每个模块都是必须的
+# 作用：构成完整的训练生命周期
+
+# ---------- 模块1：全局配置 (Global) ----------
+# 作用：定义项目级别的全局参数
+# 常量层：name, version, seed (必须字段)
+global:
+  # 常量：项目名称 (必须)
+  name: "universal_training_framework"
+
+  # 常量：配置版本 (必须)
+  version: "5.0"
+
+  # 常量：随机种子 (必须，可为null表示不固定)
+  seed: 42
+
+# ---------- 模块2：训练模式 (TrainingMode) ----------
+# 作用：声明使用哪种训练方式
+# 常量层：type (必须字段)
+training_mode:
+  # 常量：训练类型 (必须)
+  # 可选值：supervised, unsupervised, reinforcement,
+  #        self_supervised, semi_supervised, multi_task
+  type: "supervised"
+
+  # 常量：训练子类型 (可选)
+  # 示例：强化学习的 q_learning, policy_gradient, ppo
+  subtype: null
+
+# ---------- 模块3：模型定义 (Models) ----------
+# 作用：定义所有需要的神经网络模型
+# layers层：多个模型的并行定义
+models:
+  # ========== Layer: 分类器模型 ==========
+  classifier:
+    # 常量：模型类型 (必须)
+    # 可选值：Sequential, Functional, Subclass
+    type: "Sequential"
+
+    # 执行层：模型构造器 (必须)
+    # 格式：reflection/args结构
+    reflection: tensorflow.keras.Sequential
+    args: {}
+
+    # layers层：模型的层序列 (必须，可为空)
+    layers:
+      # ========== 执行层：第一层 ==========
+      - name: "dense1"                        # 层名称 (可选)
+        reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 256
+          activation: relu
+          input_shape: [784]
+        connection: null                      # 连接方式 (可选)
+
+      # ========== 执行层：第二层 ==========
+      - name: "dropout1"
+        reflection: tensorflow.keras.layers.Dropout
+        args:
+          rate: 0.3
+
+      # ========== 执行层：第三层 ==========
+      - name: "dense2"
+        reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 128
+          activation: relu
+
+      # ========== 执行层：输出层 ==========
+      - name: "output"
+        reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 10
+          activation: softmax
+
+  # ========== Layer: Actor模型 (强化学习用) ==========
+  actor:
+    type: "Sequential"
+    reflection: tensorflow.keras.Sequential
+    args: {}
+    layers:
+      - reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 128
+          activation: relu
+          input_shape: [32]
+      - reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 64
+          activation: relu
+      - reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 16
+          activation: softmax
+          name: action_logits
+
+  # ========== Layer: Critic模型 (强化学习用) ==========
+  critic:
+    type: "Sequential"
+    reflection: tensorflow.keras.Sequential
+    args: {}
+    layers:
+      - reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 128
+          activation: relu
+          input_shape: [32]
+      - reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 64
+          activation: relu
+      - reflection: tensorflow.keras.layers.Dense
+        args:
+          units: 1
+          name: state_value
+
+# ---------- 模块4：优化器定义 (Optimizers) ----------
+# 作用：定义参数更新算法
+# layers层：多个优化器的并行定义
+optimizers:
+  # ========== Layer: 主优化器 ==========
+  main_optimizer:
+    # 执行层：优化器构造器
+    reflection: tensorflow.keras.optimizers.Adam
+    args:
+      learning_rate: 0.001
+      beta_1: 0.9
+      beta_2: 0.999
+
+  # ========== Layer: Actor优化器 ==========
+  actor_opt:
+    reflection: tensorflow.keras.optimizers.Adam
+    args:
+      learning_rate: 0.0003
+      clipnorm: 0.5
+
+  # ========== Layer: Critic优化器 ==========
+  critic_opt:
+    reflection: tensorflow.keras.optimizers.Adam
+    args:
+      learning_rate: 0.001
+      clipnorm: 1.0
+
+# ---------- 模块5：损失函数定义 (Losses) ----------
+# 作用：定义优化目标
+# layers层：多个损失函数的并行定义
+losses:
+  # ========== Layer: 分类损失 ==========
+  classification_loss:
+    reflection: tensorflow.keras.losses.CategoricalCrossentropy
+    args:
+      from_logits: false
+
+  # ========== Layer: 均方误差损失 ==========
+  mse_loss:
+    reflection: tensorflow.keras.losses.MeanSquaredError
+    args: {}
+
+  # ========== Layer: 二元分类损失 ==========
+  binary_loss:
+    reflection: tensorflow.keras.losses.BinaryCrossentropy
+    args:
+      from_logits: false
+
+# ---------- 模块6：数据管理 (DataManager) ----------
+# 作用：定义数据来源和加载方式
+# 注意：使用 pandas/sklearn 等标准库，禁止引用 modules/lib
+# 常量层：训练模式对应的数据源名称 (必须)
+data_manager:
+  # ========================================================================
+  # 方式1：静态加载方式 (Static Loading)
+  # ========================================================================
+  # 特点：
+  # - 一次性加载所有数据到内存
+  # - 执行完整的数据处理流程
+  # - 适用于监督学习、无监督学习、半监督学习
+  #
+  # 流程：
+  # 1. 加载数据集 (Load Dataset)
+  # 2. 数据清洗 (Data Cleaning)
+  # 3. 特征工程 (Feature Engineering)
+  # 4. 归一化 (Normalization)
+  # 5. 标准化 (Standardization)
+  # 6. 数据集分割 (Data Splitting)
+  # ========================================================================
+  supervised_source:
+    # 常量：数据加载方式 (必须)
+    loading_mode: "static"
+
+    # ========== Pipeline Step 1: 加载数据集 ==========
+    load:
+      # 执行层：数据加载函数 (使用pandas官方函数)
+      reflection: "pandas:read_csv"
+      args:
+        filepath_or_buffer: "data/train.csv"
+        sep: ","
+        header: 0
+        index_col: null
+        dtype: null
+        engine: "c"
+        encoding: "utf-8"
+
+    # ========== Pipeline Step 2: 数据清洗 ==========
+    clean:
+      # 执行层：清洗操作序列
+      operations:
+        # 操作1：删除缺失值
+        - reflection: "pandas.DataFrame:dropna"
+          args:
+            axis: 0              # 0=删除行, 1=删除列
+            how: "any"           # any=任何缺失, all=全部缺失
+            thresh: null         # 最少有效值数量
+            subset: null         # 仅检查特定列
+            inplace: false
+
+        # 操作2：填充缺失值
+        - reflection: "pandas.DataFrame:fillna"
+          args:
+            value: null          # 填充值
+            method: "ffill"      # ffill/bfill/None
+            axis: 0
+            limit: null
+            inplace: false
+
+        # 操作3：删除重复值
+        - reflection: "pandas.DataFrame:drop_duplicates"
+          args:
+            subset: null         # 检查特定列
+            keep: "first"        # first/last/False
+            inplace: false
+
+        # 操作4：类型转换
+        - reflection: "pandas.DataFrame:astype"
+          args:
+            dtype:
+              age: "int32"
+              price: "float32"
+              category: "category"
+
+    # ========== Pipeline Step 3: 特征工程 ==========
+    engineer:
+      operations:
+        # 操作1：独热编码 (使用pandas)
+        - reflection: "pandas:get_dummies"
+          args:
+            data: "${cleaned_data}"
+            columns: ["category", "type"]
+            prefix: null
+            prefix_sep: "_"
+            dummy_na: false
+            drop_first: true
+
+        # 操作2：标签编码 (使用sklearn)
+        - reflection: "sklearn.preprocessing:LabelEncoder"
+          args:
+            # fit_transform将在执行时调用
+            columns: ["status", "level"]
+
+        # 操作3：特征分箱 (使用pandas)
+        - reflection: "pandas:cut"
+          args:
+            x: "${engineered_data.age}"
+            bins: [0, 18, 35, 60, 100]
+            labels: ["child", "youth", "adult", "senior"]
+            include_lowest: true
+
+        # 操作4：多项式特征 (使用sklearn)
+        - reflection: "sklearn.preprocessing:PolynomialFeatures"
+          args:
+            degree: 2
+            interaction_only: false
+            include_bias: false
+            # 将对指定列生成多项式特征
+            columns: ["x1", "x2", "x3"]
+
+    # ========== Pipeline Step 4: 归一化 ==========
+    normalize:
+      # 操作：MinMax归一化 (使用sklearn)
+      reflection: "sklearn.preprocessing:MinMaxScaler"
+      args:
+        feature_range: [0, 1]
+        copy: true
+        # fit_transform将在执行时调用
+        columns: ["feature1", "feature2", "feature3"]
+
+    # ========== Pipeline Step 5: 标准化 ==========
+    standardize:
+      # 操作：Z-Score标准化 (使用sklearn)
+      reflection: "sklearn.preprocessing:StandardScaler"
+      args:
+        copy: true
+        with_mean: true
+        with_std: true
+        # fit_transform将在执行时调用
+        columns: ["feature4", "feature5", "feature6"]
+
+    # ========== Pipeline Step 6: 数据集分割 ==========
+    split:
+      # 执行层：数据分割函数 (使用sklearn)
+      reflection: "sklearn.model_selection:train_test_split"
+      args:
+        # 分割配置
+        test_size: 0.3           # 测试集比例
+        train_size: null         # 训练集比例 (与test_size二选一)
+        random_state: 42
+        shuffle: true
+        stratify: null           # 分层抽样的标签列
+
+        # 输入数据（运行时指定）
+        arrays: "${processed_data}"
+
+  # ========================================================================
+  # 方式2：动态加载方式 (Dynamic Loading)
+  # ========================================================================
+  # 特点：
+  # - 按需加载数据（适合大数据集）
+  # - 通过网络或生成器获取数据
+  # - 适用于强化学习（环境交互）
+  #
+  # 流程：
+  # 1. 建立连接 (Establish Connection)
+  # 2. 按需获取 (Fetch on Demand)
+  # ========================================================================
+  reinforcement_source:
+    # 常量：数据加载方式 (必须)
+    loading_mode: "dynamic"
+
+    # ========== Connection Setup ==========
+    connection:
+      # 执行层：网络客户端连接
+      reflection: "common.utils:NetworkClient"
+      args:
+        host: "127.0.0.1"
+        port: 5000
+        protocol: "tcp"
+        timeout: 30
+        retry_times: 3
+
+    # ========== Data Fetching ==========
+    fetch:
+      # 执行层：数据获取方法
+      reflection: "common.utils:fetch_batch"
+      args:
+        batch_size: 64
+        timeout: 10
+
+  # ========================================================================
+  # 方式3：流式加载方式 (Streaming Loading)
+  # ========================================================================
+  # 特点：
+  # - 实时数据流处理
+  # - 时间序列数据
+  # - 适用于在线学习
+  # ========================================================================
+  streaming_source:
+    loading_mode: "streaming"
+
+    # 流数据源
+    stream:
+      reflection: "pandas:read_csv"
+      args:
+        filepath_or_buffer: "data/stream.csv"
+        chunksize: 1000        # 每次读取1000行
+        iterator: true
+
+    # 流式处理
+    process:
+      operations:
+        # 时间窗口
+        - reflection: "pandas.DataFrame:rolling"
+          args:
+            window: 10
+            columns: ["value"]
+
+        # 滚动统计
+        - reflection: "pandas.DataFrame:rolling"
+          args:
+            window: 7
+            columns: ["value"]
+            operations: ["mean", "std", "min", "max"]
+
+    split:
+      # 时间序列交叉验证
+      reflection: "sklearn.model_selection:TimeSeriesSplit"
+      args:
+        n_splits: 5
+        max_train_size: null
+        test_size: null
+        gap: 0
+
+# ---------- 模块7：训练流程 (TrainingPipeline) ----------
+# 作用：定义训练执行逻辑
+# 注意：使用 common.utils 中的工具函数，禁止引用 modules/lib
+# layers层：不同训练模式的并行流程定义
+training_pipeline:
+  # ========================================================================
+  # Layer: 监督学习流程
+  # ========================================================================
+  supervised:
+    # ========== 常量：循环配置 ==========
+    # 定义训练的循环方式和参数
+    loop_config:
+      # 循环类型 (必须)
+      # 可选值：epoch_batch, episode_step, iteration, custom
+      type: "epoch_batch"
+
+      # 循环参数 (必须)
+      parameters:
+        epochs: 100                   # 总epoch数
+        steps_per_epoch: null         # 每个epoch的步数 (null=自动计算)
+        batch_size: 64                # 批次大小
+
+      # 循环终止条件 (必须)
+      termination:
+        # 检查类型：epoch_based, convergence_based, time_based, custom
+        check_type: "epoch_based"
+        max_epochs: 100               # 最大epoch数
+        early_stopping:
+          enabled: true
+          monitor: "val_loss"         # 监控指标
+          patience: 10                # 容忍轮数
+          min_delta: 0.001            # 最小改进量
+          mode: "min"                 # min/max/auto
+
+    # ========== Layers层：训练步骤序列 ==========
+    # 定义单次训练迭代的详细步骤
+    step_sequence:
+      # ========== 执行层：步骤1 - 加载批次数据 ==========
+      - name: "load_batch"
+        reflection: "common.utils:load_batch_data"
+        args:
+          data_source: "${supervised_source}"
+          batch_size: "${loop_config.parameters.batch_size}"
+          shuffle: true
+        bridge: null                  # 无跳转控制
+
+      # ========== 执行层：步骤2 - 前向传播 ==========
+      - name: "forward_pass"
+        reflection: "common.utils:forward"
+        args:
+          model: "${classifier}"
+          inputs: "${load_batch.x}"
+          training: true
+        bridge: null
+
+      # ========== 执行层：步骤3 - 计算损失 ==========
+      - name: "compute_loss"
+        reflection: "common.utils:compute_loss"
+        args:
+          loss_fn: "${classification_loss}"
+          y_true: "${load_batch.y}"
+          y_pred: "${forward_pass.output}"
+        # Bridge控制：如果损失过小，跳过反向传播直接进入下一个epoch
+        bridge: "@SKIP:next_epoch?${compute_loss.loss}<0.01"
+
+      # ========== 执行层：步骤4 - 反向传播 ==========
+      - name: "backward_pass"
+        reflection: "common.utils:compute_gradients"
+        args:
+          model: "${classifier}"
+          loss: "${compute_loss.loss}"
+          tape: "${forward_pass.tape}"
+        bridge: null
+
+      # ========== 执行层：步骤5 - 更新参数 ==========
+      - name: "update_weights"
+        reflection: "common.utils:apply_gradients"
+        args:
+          optimizer: "${main_optimizer}"
+          gradients: "${backward_pass.grads}"
+          variables: "${classifier.trainable_variables}"
+        bridge: null
+
+      # ========== 执行层：步骤6 - 记录指标 ==========
+      - name: "log_metrics"
+        reflection: "common.utils:log_training_metrics"
+        args:
+          loss: "${compute_loss.loss}"
+          epoch: "${current_epoch}"
+          step: "${current_step}"
+        bridge: null
+
+      # ========== 执行层：步骤7 - 验证评估 ==========
+      - name: "validation"
+        reflection: "common.utils:evaluate_on_validation"
+        args:
+          model: "${classifier}"
+          val_data: "${supervised_source.validation}"
+          metrics: ["accuracy", "loss"]
+        # Bridge控制：每5个epoch才执行验证
+        bridge: "@SKIP:next_epoch?${current_epoch}%5!=0"
+
+      # ========== 执行层：步骤8 - 保存检查点 ==========
+      - name: "save_checkpoint"
+        reflection: "common.utils:save_model_checkpoint"
+        args:
+          model: "${classifier}"
+          optimizer: "${main_optimizer}"
+          epoch: "${current_epoch}"
+          filepath: "checkpoints/model_epoch_{epoch}.ckpt"
+        # Bridge控制：每10个epoch保存一次
+        bridge: "@SKIP:next_epoch?${current_epoch}%10!=0"
+
+  # ========================================================================
+  # Layer: 强化学习流程
+  # ========================================================================
+  reinforcement:
+    # ========== 常量：循环配置 ==========
+    loop_config:
+      type: "episode_step"
+
+      parameters:
+        episodes: 1000                # 总回合数
+        max_steps_per_episode: 500    # 每回合最大步数
+        buffer_size: 10000            # 经验回放缓冲区大小
+        update_frequency: 4           # 每4步更新一次网络
+        target_update_frequency: 100  # 每100步更新目标网络
+
+        # 探索参数
+        epsilon_start: 1.0
+        epsilon_end: 0.01
+        epsilon_decay: 0.995
+
+        # 折扣因子
+        gamma: 0.99
+        lambda_: 0.95                 # GAE lambda
+
+      termination:
+        check_type: "episode_based"
+        max_episodes: 1000
+        convergence:
+          enabled: true
+          monitor: "mean_reward"
+          threshold: 195.0            # 连续多个episode平均奖励超过此值
+          consecutive_episodes: 100
+
+    # ========== Layers层：训练步骤序列 ==========
+    step_sequence:
+      # ========== 执行层：步骤1 - 重置环境 ==========
+      - name: "reset_env"
+        reflection: "common.utils:reset_environment"
+        args:
+          env: "${reinforcement_source}"
+        bridge: null
+
+      # ========== 执行层：步骤2 - 选择动作 ==========
+      - name: "select_action"
+        reflection: "common.utils:select_action"
+        args:
+          actor: "${actor}"
+          state: "${reset_env.state}"
+          epsilon: "${current_epsilon}"
+          training: true
+        bridge: null
+
+      # ========== 执行层：步骤3 - 执行动作 ==========
+      - name: "execute_action"
+        reflection: "common.utils:step_environment"
+        args:
+          env: "${reinforcement_source}"
+          action: "${select_action.action}"
+        bridge: null
+
+      # ========== 执行层：步骤4 - 计算奖励 ==========
+      - name: "compute_reward"
+        reflection: "common.utils:compute_reward"
+        args:
+          reward: "${execute_action.reward}"
+          done: "${execute_action.done}"
+          info: "${execute_action.info}"
+        bridge: null
+
+      # ========== 执行层：步骤5 - 存储经验 ==========
+      - name: "store_experience"
+        reflection: "common.utils:store_to_buffer"
+        args:
+          buffer: "${replay_buffer}"
+          state: "${reset_env.state}"
+          action: "${select_action.action}"
+          reward: "${compute_reward.reward}"
+          next_state: "${execute_action.next_state}"
+          done: "${execute_action.done}"
+        bridge: null
+
+      # ========== 执行层：步骤6 - 采样批次 ==========
+      - name: "sample_batch"
+        reflection: "common.utils:sample_from_buffer"
+        args:
+          buffer: "${replay_buffer}"
+          batch_size: 64
+        # Bridge控制：只有当buffer大小足够且到达更新频率时才执行
+        bridge: "@SKIP:next_step?${buffer.size}<1000 OR ${current_step}%${update_frequency}!=0"
+
+      # ========== 执行层：步骤7 - 计算TD目标 ==========
+      - name: "compute_td_target"
+        reflection: "common.utils:compute_td_target"
+        args:
+          critic: "${critic}"
+          rewards: "${sample_batch.rewards}"
+          next_states: "${sample_batch.next_states}"
+          dones: "${sample_batch.dones}"
+          gamma: "${loop_config.parameters.gamma}"
+        bridge: "@SKIP:next_step?${sample_batch}==null"
+
+      # ========== 执行层：步骤8 - 更新Critic ==========
+      - name: "update_critic"
+        reflection: "common.utils:update_critic_network"
+        args:
+          critic: "${critic}"
+          optimizer: "${critic_opt}"
+          states: "${sample_batch.states}"
+          td_targets: "${compute_td_target.targets}"
+          loss_fn: "${mse_loss}"
+        bridge: "@SKIP:next_step?${sample_batch}==null"
+
+      # ========== 执行层：步骤9 - 更新Actor ==========
+      - name: "update_actor"
+        reflection: "common.utils:update_actor_network"
+        args:
+          actor: "${actor}"
+          critic: "${critic}"
+          optimizer: "${actor_opt}"
+          states: "${sample_batch.states}"
+        bridge: "@SKIP:next_step?${sample_batch}==null"
+
+      # ========== 执行层：步骤10 - 更新目标网络 ==========
+      - name: "update_target"
+        reflection: "common.utils:update_target_network"
+        args:
+          target_network: "${target_critic}"
+          source_network: "${critic}"
+          tau: 0.005
+        # Bridge控制：按照指定频率更新目标网络
+        bridge: "@SKIP:next_step?${current_step}%${target_update_frequency}!=0"
+
+      # ========== 执行层：步骤11 - 检查回合结束 ==========
+      - name: "check_episode_done"
+        reflection: "common.utils:check_done"
+        args:
+          done: "${execute_action.done}"
+          step: "${current_step}"
+          max_steps: "${loop_config.parameters.max_steps_per_episode}"
+        # Bridge控制：如果回合结束，跳转到reset_env重新开始
+        bridge: "@LOOP:reset_env?${check_episode_done.is_done}==false(max=${max_steps_per_episode})"
+
+      # ========== 执行层：步骤12 - 记录回合信息 ==========
+      - name: "log_episode"
+        reflection: "common.utils:log_episode_metrics"
+        args:
+          episode: "${current_episode}"
+          total_reward: "${episode_total_reward}"
+          steps: "${episode_steps}"
+          epsilon: "${current_epsilon}"
+        bridge: null
+
+  # ========================================================================
+  # Layer: 无监督学习流程 (聚类)
+  # ========================================================================
+  unsupervised_clustering:
+    # ========== 常量：循环配置 ==========
+    loop_config:
+      type: "iteration"
+
+      parameters:
+        max_iterations: 100
+        n_clusters: 5
+        init_method: "k-means++"
+        n_init: 10
+
+      termination:
+        check_type: "convergence_based"
+        max_iterations: 100
+        convergence_threshold: 0.0001
+
+    # ========== Layers层：训练步骤序列 ==========
+    step_sequence:
+      # ========== 执行层：步骤1 - 初始化聚类中心 ==========
+      - name: "initialize_centers"
+        reflection: "common.utils:initialize_cluster_centers"
+        args:
+          data: "${unsupervised_source}"
+          n_clusters: "${loop_config.parameters.n_clusters}"
+          method: "${loop_config.parameters.init_method}"
+        bridge: null
+
+      # ========== 执行层：步骤2 - 分配样本到最近中心 ==========
+      - name: "assign_clusters"
+        reflection: "common.utils:assign_to_nearest_center"
+        args:
+          data: "${unsupervised_source}"
+          centers: "${initialize_centers.centers}"
+        bridge: null
+
+      # ========== 执行层：步骤3 - 更新聚类中心 ==========
+      - name: "update_centers"
+        reflection: "common.utils:update_cluster_centers"
+        args:
+          data: "${unsupervised_source}"
+          assignments: "${assign_clusters.assignments}"
+          n_clusters: "${loop_config.parameters.n_clusters}"
+        bridge: null
+
+      # ========== 执行层：步骤4 - 计算惯性 ==========
+      - name: "compute_inertia"
+        reflection: "common.utils:compute_inertia"
+        args:
+          data: "${unsupervised_source}"
+          centers: "${update_centers.centers}"
+          assignments: "${assign_clusters.assignments}"
+        bridge: null
+
+      # ========== 执行层：步骤5 - 检查收敛 ==========
+      - name: "check_convergence"
+        reflection: "common.utils:check_convergence"
+        args:
+          current_inertia: "${compute_inertia.inertia}"
+          previous_inertia: "${previous_inertia}"
+          threshold: "${loop_config.termination.convergence_threshold}"
+        # Bridge控制：如果未收敛，继续循环
+        bridge: "@LOOP:assign_clusters?${check_convergence.converged}==false(max=${max_iterations})"
+
+      # ========== 执行层：步骤6 - 记录结果 ==========
+      - name: "log_iteration"
+        reflection: "common.utils:log_iteration_metrics"
+        args:
+          iteration: "${current_iteration}"
+          inertia: "${compute_inertia.inertia}"
+          n_iter: "${n_iter}"
+        bridge: null
+
+  # ========================================================================
+  # Layer: 自监督学习流程 (对比学习)
+  # ========================================================================
+  self_supervised:
+    # ========== 常量：循环配置 ==========
+    loop_config:
+      type: "epoch_batch"
+
+      parameters:
+        epochs: 200
+        batch_size: 256
+        temperature: 0.5          # 对比学习温度参数
+
+      termination:
+        check_type: "epoch_based"
+        max_epochs: 200
+
+    # ========== Layers层：训练步骤序列 ==========
+    step_sequence:
+      # ========== 执行层：步骤1 - 加载批次 ==========
+      - name: "load_batch"
+        reflection: "common.utils:load_batch_data"
+        args:
+          data_source: "${self_supervised_source}"
+          batch_size: "${loop_config.parameters.batch_size}"
+        bridge: null
+
+      # ========== 执行层：步骤2 - 数据增强1 ==========
+      - name: "augment_view1"
+        reflection: "common.utils:augment_data"
+        args:
+          data: "${load_batch.x}"
+          augmentation_type: "contrastive_view1"
+        bridge: null
+
+      # ========== 执行层：步骤3 - 数据增强2 ==========
+      - name: "augment_view2"
+        reflection: "common.utils:augment_data"
+        args:
+          data: "${load_batch.x}"
+          augmentation_type: "contrastive_view2"
+        bridge: null
+
+      # ========== 执行层：步骤4 - 编码器前向传播 ==========
+      - name: "encode_views"
+        reflection: "common.utils:encode_contrastive_views"
+        args:
+          encoder: "${encoder}"
+          view1: "${augment_view1.output}"
+          view2: "${augment_view2.output}"
+        bridge: null
+
+      # ========== 执行层：步骤5 - 计算对比损失 ==========
+      - name: "compute_contrastive_loss"
+        reflection: "common.utils:compute_nt_xent_loss"
+        args:
+          z1: "${encode_views.z1}"
+          z2: "${encode_views.z2}"
+          temperature: "${loop_config.parameters.temperature}"
+        bridge: null
+
+      # ========== 执行层：步骤6 - 反向传播 ==========
+      - name: "backward_pass"
+        reflection: "common.utils:compute_gradients"
+        args:
+          model: "${encoder}"
+          loss: "${compute_contrastive_loss.loss}"
+        bridge: null
+
+      # ========== 执行层：步骤7 - 更新参数 ==========
+      - name: "update_weights"
+        reflection: "common.utils:apply_gradients"
+        args:
+          optimizer: "${main_optimizer}"
+          gradients: "${backward_pass.grads}"
+          variables: "${encoder.trainable_variables}"
+        bridge: null
+
+# ---------- 模块8：评估配置 (Evaluation) ----------
+# 作用：定义模型评估方式
+# 注意：禁止引用 modules/lib，评估逻辑由 main.py 驱动
+# layers层：不同训练模式的评估配置
+evaluation:
+  # ========== Layer: 监督学习评估 ==========
+  supervised_eval:
+    # 常量：评估频率
+    frequency: "epoch"
+
+    # 常量：评估数据集
+    split: "val"
+
+    # 常量：评估指标列表
+    metrics: ["accuracy", "precision", "recall", "f1"]
+
+  # ========== Layer: 强化学习评估 ==========
+  reinforcement_eval:
+    frequency: 10
+    eval_episodes: 10
+    metrics: ["mean_reward", "mean_episode_length", "success_rate"]
+
+# ---------- 模块9：导出配置 (Export) ----------
+# 作用：定义模型导出方式
+# 注意：使用 tf2onnx 等标准库，禁止引用 modules/lib
+# layers层：多个导出器的并行定义
+export:
+  # ========== Layer: ONNX导出器 ==========
+  onnx_exporter:
+    reflection: tf2onnx.convert:from_keras
+    args:
+      model: "classifier"
+      output_path: "outputs/model.onnx"
+      opset: 16
+      input_signature: null
+      custom_ops: null
+      shape_override: null
+      enabled: true
+
+  # ========== Layer: SavedModel导出器 ==========
+  saved_model_exporter:
+    reflection: tensorflow.saved_model:save
+    args:
+      obj: "classifier"
+      export_dir: "outputs/saved_model"
+      signatures: null
+      options: null
+      enabled: true
+
+  # ========== Layer: TFLite导出器 (可选) ==========
+  tflite_exporter:
+    reflection: tensorflow.lite.TFLiteConverter:from_keras_model
+    args:
+      model: "classifier"
+      output_path: "outputs/model.tflite"
+      optimizations: ["DEFAULT"]
+      enabled: false
+
+  # ========== Layer: H5格式导出器 (可选) ==========
+  h5_exporter:
+    reflection: tensorflow.keras.models.Model:save
+    args:
+      filepath: "outputs/model.h5"
+      overwrite: true
+      include_optimizer: true
+      save_format: "h5"
+      enabled: false
+
+# ---------- 模块10：部署配置 (Deployment) ----------
+# 作用：定义模型部署为服务的方式
+# 注意：仅此模块使用 lib.deployment 资源
+# layers层：多个部署服务的并行定义
+deployment:
+  # ========== Layer: REST API服务 ==========
+  rest_api_service:
+    reflection: lib.deployment:RestAPIServer
+    args:
+      model_path: "outputs/model.onnx"
+      host: "0.0.0.0"
+      port: 9000
+      endpoints:
+        predict: "/api/predict"
+        health: "/health"
+        metrics: "/metrics"
+      performance:
+        batch_size: 32
+        timeout: 30
+        workers: 4
+      enabled: true
+
+  # ========== Layer: gRPC服务 (可选) ==========
+  grpc_service:
+    reflection: lib.deployment:GRPCServer
+    args:
+      model_path: "outputs/model.onnx"
+      host: "0.0.0.0"
+      port: 50051
+      max_workers: 10
+      enabled: false
+
+  # ========== Layer: TensorFlow Serving (可选) ==========
+  tf_serving:
+    reflection: lib.deployment:TFServingDeployer
+    args:
+      model_path: "outputs/saved_model"
+      model_name: "classifier"
+      port: 8501
+      rest_api_port: 8500
+      enabled: false
+
+  # ========== Layer: Docker容器部署 (可选) ==========
+  docker_deployment:
+    reflection: lib.deployment:DockerDeployer
+    args:
+      model_path: "outputs/model.onnx"
+      dockerfile_template: "deploy/Dockerfile.template"
+      image_name: "ml-model:latest"
+      container_port: 9000
+      host_port: 9000
+      enabled: false
+
+  # ========== Layer: AWS Lambda部署 (可选) ==========
+  lambda_deployment:
+    reflection: lib.deployment:LambdaDeployer
+    args:
+      model_path: "outputs/model.onnx"
+      function_name: "ml-model-inference"
+      runtime: "python3.9"
+      memory_size: 512
+      timeout: 30
+      enabled: false
+
+# ============================================================
+# 配置结构说明
+# ============================================================
+#
+# 四层结构：
+#
+# 1. 模块层 (Module Layer)
+#    - 第一级key (global, training_mode, models, ...)
+#    - 作用：定义训练生命周期的主要步骤
+#    - 特点：缺一不可，必须全部存在
+#
+# 2. 常量层 (Constant Layer)
+#    - 每个模块下的必须字段 (name, version, type, loop_config, ...)
+#    - 作用：定义模块的必要配置和状态
+#    - 特点：训练上下文必须明确定义
+#
+# 3. Layers层 (Layers)
+#    - 模型定义中的layers字段
+#    - 训练流程中的step_sequence字段
+#    - 数据管理中的数据集分割 (train, val, test)
+#    - 作用：分割平行配置
+#    - 特点：多个并行单元的容器
+#
+# 4. 执行层 (Execution Layer)
+#    - reflection/args/[name/bridge/connection]结构
+#    - 作用：配置驱动的核心基础
+#    - 特点：通过反射实现动态调用
+#
+# ============================================================
+# 训练流程 (TrainingPipeline) 详细说明
+# ============================================================
+#
+# 结构设计：
+#
+# training_pipeline:
+#   {mode}:                          # Layer层：训练模式 (supervised, reinforcement, ...)
+#     loop_config:                   # 常量层：循环配置
+#       type: "epoch_batch"          # 循环类型
+#       parameters: {...}            # 循环参数
+#       termination: {...}           # 终止条件
+#
+#     step_sequence:                 # Layers层：训练步骤序列
+#       - name: "step_name"          # 执行层：单个步骤
+#         reflection: "func"         # 调用的函数
+#         args: {...}                # 函数参数
+#         bridge: "@SKIP:target?"    # 可选的跳转控制
+#
+# Bridge 控制语法：
+#
+# 1. @SKIP:target
+#    - 跳过后续步骤，直接跳转到target步骤
+#    - 示例：bridge: "@SKIP:next_epoch"
+#
+# 2. @SKIP:target?condition
+#    - 条件跳转：满足condition时跳转
+#    - 示例：bridge: "@SKIP:validation?${current_epoch}%5!=0"
+#    - 含义：如果当前epoch不是5的倍数，跳过validation步骤
+#
+# 3. @LOOP:target?condition(max=N)
+#    - 循环控制：不满足condition时循环回target
+#    - 示例：bridge: "@LOOP:reset_env?${done}==false(max=500)"
+#    - 含义：如果未结束，循环回reset_env，最多循环500次
+#
+# 4. @BRANCH:target1,target2?condition
+#    - 分支控制：根据condition选择分支
+#    - 示例：bridge: "@BRANCH:path_a,path_b?${loss}<0.5"
+#    - 含义：如果loss<0.5跳转到path_a，否则跳转到path_b
+#
+# 条件表达式支持：
+#    - 比较运算符：==, !=, >, <, >=, <=
+#    - 逻辑运算符：AND, OR, NOT
+#    - 变量引用：${variable}, ${step.field}
+#    - 示例：${loss}<0.01 AND ${epoch}>10
+#
+# ============================================================
+# 引用规则
+# ============================================================
+#
+# 变量引用：
+#    - ${variable}         : 运行时变量
+#    - ${step_name.field}  : 步骤输出字段
+#    - ${module_name}      : 模块引用
+#
+# Bridge控制：
+#    - @SKIP:target        : 跳转到目标步骤
+#    - @BRANCH:target?cond : 条件分支
+#    - @LOOP:target(max=N) : 循环控制
+#
+# Connection控制：
+#    - @SEQUENTIAL         : 顺序连接
+#    - @RESIDUAL:layer     : 残差连接
+#    - @CONCAT:[l1,l2]     : 拼接连接
+#    - @ADD:[l1,l2]        : 相加连接
+#
+# ============================================================
+# 资源引用规则
+# ============================================================
+#
+# 为避免递归依赖，本配置文件遵循以下规则：
+#
+# ✅ 允许引用：
+#    1. TensorFlow/Keras 标准库
+#       - tensorflow.keras.* (模型、层、优化器、损失函数)
+#       - tensorflow.saved_model.*
+#       - tensorflow.lite.*
+#
+#    2. 数据处理标准库
+#       - pandas.* (数据加载和处理)
+#       - sklearn.* (特征工程、数据分割)
+#       - numpy.* (数值计算)
+#
+#    3. 导出标准库
+#       - tf2onnx.* (ONNX转换)
+#
+#    4. common.utils (工具函数)
+#       - common.utils:NetworkClient (网络客户端)
+#       - common.utils:其他工具函数
+#
+#    5. lib.deployment (仅部署模块)
+#       - lib.deployment:RestAPIServer
+#       - lib.deployment:GRPCServer
+#       - lib.deployment:TFServingDeployer
+#       - lib.deployment:DockerDeployer
+#       - lib.deployment:LambdaDeployer
+#
+# ❌ 禁止引用：
+#    1. modules.* 的任何资源
+#       - 原因：会造成循环依赖
+#       - modules 是业务逻辑层，由 main.py 驱动
+#       - 配置文件不应该调用 modules
+#
+#    2. lib.* 的非部署资源
+#       - lib.data_loader
+#       - lib.training_utils
+#       - lib.checkpoint
+#       - lib.logger
+#       - lib.export
+#       等等（除了 lib.deployment 之外）
+#
+# 设计原则：
+#    1. 配置文件是声明式的，不包含业务逻辑
+#    2. 训练/评估逻辑由 main.py 和 modules 实现
+#    3. 配置只负责参数定义和资源声明
+#    4. 避免在配置中调用业务代码
+#
+# 模块职责划分：
+#    - config/*.yaml     : 参数配置（本文件）
+#    - main.py           : 流程控制和调度
+#    - modules/*         : 业务逻辑实现
+#    - common/utils.py   : 通用工具函数
+#    - lib/deployment.*  : 部署服务实现
+#
+# ============================================================
