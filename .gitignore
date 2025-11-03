@@ -2,7 +2,10 @@
 
 /.venv
 
-/config
+!config/config_example.yaml
+config/
+
+
 
 /data
 
